@@ -31,6 +31,12 @@ npm run lint
 npm run build
 ```
 
+## Vercel deployment
+
+The repository includes `vercel.json`. Vercel must run `npm run build` and publish `dist/client`; the static export produces `index.html`, the web manifest, and the service worker in that directory.
+
+Add every required value from `.env.example` to the Vercel project's Environment Variables, then redeploy the latest `main` commit. Use the production domain or URL shown on the successful deployment. A Vercel response containing `X-Vercel-Error: DEPLOYMENT_NOT_FOUND` means the URL points to a deployment that does not exist or was removed; it is not an in-app route error.
+
 ## Environment
 
 Copy `.env.example` to `.env.local` and fill in the Firebase web app configuration. Firebase web configuration identifies the Firebase project but is not a server secret; security must be enforced with Firebase Authentication and database/storage rules. Never add Admin SDK credentials or private service keys to a `VITE_` variable.
