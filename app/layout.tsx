@@ -8,6 +8,34 @@ export const metadata: Metadata = {
   title: 'Relay — Private chat',
   description: 'Fast, focused conversations with the people who matter.',
   applicationName: 'Relay',
+  manifest: '/manifest.webmanifest',
+  icons: {
+    icon: [
+      {
+        url: '/favicon-32x32.png',
+        sizes: '32x32',
+        type: 'image/png',
+      },
+      {
+        url: '/pwa-192x192.png',
+        sizes: '192x192',
+        type: 'image/png',
+      },
+    ],
+    shortcut: '/favicon-32x32.png',
+    apple: [
+      {
+        url: '/apple-touch-icon.png',
+        sizes: '180x180',
+        type: 'image/png',
+      },
+    ],
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Relay',
+  },
 };
 
 export const viewport: Viewport = {

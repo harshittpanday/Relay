@@ -2,7 +2,6 @@ import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
-import { VitePWA } from 'vite-plugin-pwa';
 import hostingConfig from './.openai/hosting.json' with { type: 'json' };
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
@@ -52,64 +51,6 @@ export default defineConfig(async () => {
       : undefined,
     plugins: [
       vinext(),
-      VitePWA({
-        outDir: 'dist/client',
-        registerType: 'prompt',
-        injectRegister: false,
-        includeAssets: ['favicon.svg', 'pwa-icon.svg'],
-        manifest: {
-          name: 'Relay — Private chat',
-          short_name: 'Relay',
-          description: 'Fast, focused realtime conversations.',
-          theme_color: '#0b0d10',
-          background_color: '#0b0d10',
-          display: 'standalone',
-          start_url: '/',
-          scope: '/',
-          orientation: 'portrait-primary',
-          icons: [
-            {
-              src: '/pwa-icon.svg',
-              sizes: 'any',
-              type: 'image/svg+xml',
-              purpose: 'any',
-            },
-            {
-              src: '/pwa-maskable.svg',
-              sizes: 'any',
-              type: 'image/svg+xml',
-              purpose: 'maskable',
-            },
-          ],
-        },
-        workbox: {
-          navigateFallback: '/',
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-          runtimeCaching: [
-            {
-              urlPattern: ({ request }) => request.mode === 'navigate',
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'relay-pages',
-                networkTimeoutSeconds: 4,
-                cacheableResponse: { statuses: [0, 200] },
-              },
-            },
-            {
-              urlPattern: /^https:\/\/res\.cloudinary\.com\//,
-              handler: 'CacheFirst',
-              options: {
-                cacheName: 'relay-images',
-                expiration: {
-                  maxEntries: 80,
-                  maxAgeSeconds: 60 * 60 * 24 * 14,
-                },
-                cacheableResponse: { statuses: [0, 200] },
-              },
-            },
-          ],
-        },
-      }),
       sites(),
       cloudflare({
         viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },

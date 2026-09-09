@@ -35,7 +35,7 @@ export function notifyIncoming(
   const notification = new Notification(sender.displayName, {
     body:
       message.type === 'image' ? 'Sent a photo' : message.text.slice(0, 120),
-    icon: sender.pfpURL || '/pwa-icon.svg',
+    icon: sender.pfpURL || '/pwa-192x192.png',
     tag: `${chatId}-${message.id}`,
   });
   notification.onclick = () => {
