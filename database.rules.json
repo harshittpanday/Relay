@@ -1,0 +1,21 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      ".read": "auth != null && query.orderByChild === ('participants/' + auth.uid) && query.equalTo === true",
+      "$uid": { ".write": "auth != null && auth.uid === $uid" }
+    },
+    "usernames": {
+      ".read": "auth != null",
+      "$username": { ".write": "auth != null && (!data.exists() || data.val() === auth.uid)" }
+    },
+    "chats": {
+      ".read": "auth != null",
+      "$chatId": {
+        ".read": "auth != null && data.child('participants').child(auth.uid).val() === true",
+        ".write": "auth != null && (data.child('participants').child(auth.uid).val() === true || newData.child('participants').child(auth.uid).val() === true)"
+      }
+    }
+  }
+}
