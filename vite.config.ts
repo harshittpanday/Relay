@@ -53,6 +53,7 @@ export default defineConfig(async () => {
     plugins: [
       vinext(),
       VitePWA({
+        outDir: 'dist/client',
         registerType: 'prompt',
         injectRegister: false,
         includeAssets: ['favicon.svg', 'pwa-icon.svg'],
