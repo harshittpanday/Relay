@@ -152,6 +152,15 @@ export function subscribeConversations(
     stopAdded();
     stopRemoved();
     const legacyQuery = getLegacyChatQuery(uid);
+    const handleLegacyError = (error: Error) => {
+      if (isMissingIndexError(error)) {
+        console.debug(
+          '[Relay chats] Legacy chat query is running without an optional Firebase index.',
+        );
+        return;
+      }
+      onError(error);
+    };
     stopAdded = onChildAdded(
       legacyQuery,
       (snapshot) => {
@@ -161,18 +170,18 @@ export function subscribeConversations(
         );
         void attachConversation(snapshot.key!, otherUid, raw);
       },
-      onError,
+      handleLegacyError,
     );
     stopRemoved = onChildRemoved(
       legacyQuery,
       (snapshot) => removeConversation(snapshot.key!),
-      onError,
+      handleLegacyError,
     );
     void get(legacyQuery)
       .then(() => {
         notificationsReady = true;
       })
-      .catch(onError);
+      .catch(handleLegacyError);
   };
 
   const fallBackFromIndex = (error: Error) => {
@@ -231,6 +240,11 @@ const getLegacyChatQuery = (uid: string) =>
     orderByChild(`participants/${uid}`),
     equalTo(true),
   );
+
+const isMissingIndexError = (error: Error) => {
+  const message = error.message.toLowerCase();
+  return message.includes('index not defined') || message.includes('.indexon');
+};
 
 async function migrateUserChatIndex(uid: string) {
   const versionRef = ref(database, `userChatIndexVersion/${uid}`);
