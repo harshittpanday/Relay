@@ -1,7 +1,6 @@
 import {
   equalTo,
   get,
-  limitToLast,
   onChildAdded,
   onChildRemoved,
   onValue,
@@ -15,7 +14,7 @@ import {
   update,
 } from 'firebase/database';
 import { database } from '@/lib/firebase';
-import { getUser } from './users';
+import { subscribeUser } from './users';
 import type { Chat, Conversation, Message } from '@/types/chat';
 
 const normalizeMessage = (id: string, raw: Partial<Message>): Message => ({
@@ -32,89 +31,178 @@ export function subscribeConversations(
   uid: string,
   callback: (items: Conversation[]) => void,
   onError: (error: Error) => void,
+  onIncoming?: (conversation: Conversation, message: Message) => void,
 ) {
   const items = new Map<string, Conversation>();
   const childStops = new Map<string, Array<() => void>>();
   let closed = false;
-  const emit = () =>
-    callback(
-      [...items.values()].sort(
-        (a, b) =>
-          (b.updatedAt || b.latestMessage?.time || 0) -
-          (a.updatedAt || a.latestMessage?.time || 0),
-      ),
-    );
-  const membershipQuery = query(
-    ref(database, 'chats'),
-    orderByChild(`participants/${uid}`),
-    equalTo(true),
-  );
-  const stopAdded = onChildAdded(
-    membershipQuery,
-    async (snapshot) => {
-      const raw = snapshot.val() as Chat;
-      const id = snapshot.key!;
-      if (closed || !raw.participants?.[uid] || childStops.has(id)) return;
-      const otherUid = Object.keys(raw.participants).find(
+  let notificationsReady = false;
+  let usingLegacyFallback = false;
+  let stopAdded: () => void = () => undefined;
+  let stopRemoved: () => void = () => undefined;
+  const emit = () => callback([...items.values()]);
+  const indexRef = ref(database, `userChats/${uid}`);
+
+  const removeConversation = (id: string) => {
+    childStops.get(id)?.forEach((stop) => stop());
+    childStops.delete(id);
+    items.delete(id);
+    emit();
+  };
+
+  const attachConversation = async (
+    id: string,
+    otherUidHint?: string,
+    initialChat?: Chat,
+  ) => {
+    if (closed || childStops.has(id)) return;
+    const stops: Array<() => void> = [];
+    childStops.set(id, stops);
+
+    let otherUid = otherUidHint;
+    if (!otherUid) {
+      const participants = await get(ref(database, `chats/${id}/participants`));
+      otherUid = Object.keys(participants.val() || {}).find(
         (candidate) => candidate !== uid,
       );
-      if (!otherUid) return;
-      const otherUser = await getUser(otherUid);
-      if (closed) return;
+    }
+    if (closed || childStops.get(id) !== stops) return;
+    if (!otherUid) {
+      childStops.delete(id);
+      return;
+    }
+    let userReady = false;
+    let latestOtherUser: Conversation['otherUser'];
+    const initialLatest = getLatestMessage(initialChat);
+    const stopUser = subscribeUser(otherUid, (otherUser) => {
+      if (closed || childStops.get(id) !== stops) return;
+      latestOtherUser = otherUser;
+      if (userReady) return;
+      userReady = true;
       items.set(id, {
         id,
-        participants: raw.participants,
+        participants: { [uid]: true, [otherUid]: true },
         otherUser,
-        unread: raw.unread,
-        updatedAt: raw.updatedAt,
+        unread: initialChat?.unread,
+        latestMessage: initialLatest,
+        updatedAt: initialLatest?.time || initialChat?.updatedAt,
       });
       emit();
-      const stopLatest = onValue(
-        query(ref(database, `chats/${id}/messages`), limitToLast(1)),
-        (messageSnapshot) => {
-          let latest: Message | undefined;
-          messageSnapshot.forEach((child) => {
-            latest = normalizeMessage(child.key!, child.val());
-          });
-          const current = items.get(id);
-          if (current)
-            items.set(id, {
+
+      let latestHydrated = false;
+      let latestKey = '';
+      stops.push(
+        onValue(
+          ref(database, `chats/${id}/lastMessage`),
+          (messageSnapshot) => {
+            const raw = messageSnapshot.val() as Partial<Message> | null;
+            const latest = raw
+              ? normalizeMessage(
+                  raw.id || `${raw.sender || 'unknown'}-${raw.time || 0}`,
+                  raw,
+                )
+              : items.get(id)?.latestMessage;
+            const nextKey = latest?.id || '';
+            const current = items.get(id);
+            if (!current) return;
+            const nextConversation = {
               ...current,
               latestMessage: latest,
               updatedAt: latest?.time || current.updatedAt,
-            });
-          emit();
-        },
-        onError,
-      );
-      const stopUnread = onValue(
-        ref(database, `chats/${id}/unread/${uid}`),
-        (unreadSnapshot) => {
-          const current = items.get(id);
-          if (current)
+            };
+            items.set(id, nextConversation);
+            emit();
+            if (
+              notificationsReady &&
+              latestHydrated &&
+              latest &&
+              nextKey !== latestKey &&
+              latest.sender !== uid
+            )
+              onIncoming?.(
+                { ...nextConversation, otherUser: latestOtherUser },
+                latest,
+              );
+            latestKey = nextKey;
+            latestHydrated = true;
+          },
+          onError,
+        ),
+        onValue(
+          ref(database, `chats/${id}/unread/${uid}`),
+          (unreadSnapshot) => {
+            const current = items.get(id);
+            if (!current) return;
             items.set(id, {
               ...current,
               unread: { [uid]: Number(unreadSnapshot.val()) || 0 },
             });
-          emit();
-        },
-        onError,
+            emit();
+          },
+          onError,
+        ),
       );
-      childStops.set(id, [stopLatest, stopUnread]);
-    },
-    onError,
-  );
-  const stopRemoved = onChildRemoved(
-    membershipQuery,
-    (snapshot) => {
-      const id = snapshot.key!;
-      childStops.get(id)?.forEach((stop) => stop());
-      childStops.delete(id);
-      items.delete(id);
-      emit();
-    },
-    onError,
-  );
+    });
+    stops.push(stopUser);
+  };
+
+  const startLegacyFallback = () => {
+    if (closed || usingLegacyFallback) return;
+    usingLegacyFallback = true;
+    stopAdded();
+    stopRemoved();
+    const legacyQuery = getLegacyChatQuery(uid);
+    stopAdded = onChildAdded(
+      legacyQuery,
+      (snapshot) => {
+        const raw = snapshot.val() as Chat;
+        const otherUid = Object.keys(raw.participants || {}).find(
+          (candidate) => candidate !== uid,
+        );
+        void attachConversation(snapshot.key!, otherUid, raw);
+      },
+      onError,
+    );
+    stopRemoved = onChildRemoved(
+      legacyQuery,
+      (snapshot) => removeConversation(snapshot.key!),
+      onError,
+    );
+    void get(legacyQuery)
+      .then(() => {
+        notificationsReady = true;
+      })
+      .catch(onError);
+  };
+
+  const fallBackFromIndex = (error: Error) => {
+    if (usingLegacyFallback || closed) return;
+    console.warn(
+      '[Relay chats] The optimized userChats index is unavailable; using the existing chat membership query until the new Firebase rules are deployed.',
+      error,
+    );
+    startLegacyFallback();
+  };
+
+  void migrateUserChatIndex(uid).then(() => {
+    if (closed) return;
+    stopAdded = onChildAdded(
+      indexRef,
+      (snapshot) => {
+        const otherUid =
+          typeof snapshot.val() === 'string' ? snapshot.val() : undefined;
+        void attachConversation(snapshot.key!, otherUid);
+      },
+      fallBackFromIndex,
+    );
+    stopRemoved = onChildRemoved(
+      indexRef,
+      (snapshot) => removeConversation(snapshot.key!),
+      fallBackFromIndex,
+    );
+    notificationsReady = true;
+  }, fallBackFromIndex);
+
   return () => {
     closed = true;
     stopAdded();
@@ -122,6 +210,67 @@ export function subscribeConversations(
     childStops.forEach((stops) => stops.forEach((stop) => stop()));
     childStops.clear();
   };
+}
+
+const getLatestMessage = (chat?: Chat) => {
+  if (chat?.lastMessage)
+    return normalizeMessage(
+      chat.lastMessage.id ||
+        `${chat.lastMessage.sender || 'unknown'}-${chat.lastMessage.time || 0}`,
+      chat.lastMessage,
+    );
+  if (!chat?.messages) return undefined;
+  return Object.entries(chat.messages)
+    .map(([id, message]) => normalizeMessage(id, message))
+    .sort((a, b) => b.time - a.time)[0];
+};
+
+const getLegacyChatQuery = (uid: string) =>
+  query(
+    ref(database, 'chats'),
+    orderByChild(`participants/${uid}`),
+    equalTo(true),
+  );
+
+async function migrateUserChatIndex(uid: string) {
+  const versionRef = ref(database, `userChatIndexVersion/${uid}`);
+  const [version, index] = await Promise.all([
+    get(versionRef),
+    get(ref(database, `userChats/${uid}`)),
+  ]);
+  if (version.val() === 1 && index.exists()) return;
+
+  const legacyQuery = getLegacyChatQuery(uid);
+  const snapshot = await get(legacyQuery);
+  const updates: Record<string, unknown> = {
+    [`userChatIndexVersion/${uid}`]: 1,
+  };
+  snapshot.forEach((child) => {
+    const raw = child.val() as Chat;
+    const chatId = child.key!;
+    const otherUid = Object.keys(raw.participants || {}).find(
+      (candidate) => candidate !== uid,
+    );
+    if (!otherUid) return;
+    updates[`userChats/${uid}/${chatId}`] = otherUid;
+    updates[`userChats/${otherUid}/${chatId}`] = uid;
+
+    if (!raw.lastMessage && raw.messages) {
+      const latest = Object.entries(raw.messages)
+        .map(([id, message]) => normalizeMessage(id, message))
+        .sort((a, b) => b.time - a.time)[0];
+      if (latest)
+        updates[`chats/${chatId}/lastMessage`] = {
+          id: latest.id,
+          sender: latest.sender,
+          text: latest.text,
+          imageURL: latest.imageURL || null,
+          type: latest.type,
+          time: latest.time,
+        };
+    }
+  });
+  await update(ref(database), updates);
 }
 
 export async function ensureChat(myUid: string, otherUid: string) {
@@ -134,6 +283,17 @@ export async function ensureChat(myUid: string, otherUid: string) {
       unread: { [myUid]: 0, [otherUid]: 0 },
       updatedAt: serverTimestamp(),
     });
+  try {
+    await update(ref(database), {
+      [`userChats/${myUid}/${chatId}`]: otherUid,
+      [`userChats/${otherUid}/${chatId}`]: myUid,
+    });
+  } catch (error) {
+    console.warn(
+      '[Relay chats] Chat created, but its optional optimized index could not be updated.',
+      error,
+    );
+  }
   return chatId;
 }
 export function subscribeMessages(
@@ -202,7 +362,14 @@ export async function sendMessage(
   });
   await Promise.all([
     update(ref(database, `chats/${chatId}`), {
-      lastMessage: { sender: senderUid, text: payload.text || '', type, time },
+      lastMessage: {
+        id: messageRef.key!,
+        sender: senderUid,
+        text: payload.text || '',
+        imageURL: payload.imageURL || null,
+        type,
+        time,
+      },
       updatedAt: time,
     }),
     runTransaction(

@@ -10,7 +10,7 @@ Relay is a modern TypeScript rebuild of the original Firebase ChatApp. It uses R
 - Text and Cloudinary-hosted image messages with a lightbox
 - Responsive desktop/mobile navigation, safe-area support, loading/empty/error states
 - User search, profile editing, profile images, bio, and immutable usernames
-- Opt-in in-page browser notifications while Relay is open
+- Opt-in service-worker browser notifications while Relay is running in a background tab or installed PWA window
 - Installable PWA, cached application shell, cached Cloudinary images, and a prompt-based update flow
 - Offline/reconnecting UI and failed-message retry without losing the draft
 
@@ -60,7 +60,7 @@ Optional image-upload variables:
 
 1. Enable Email/Password under Firebase Authentication.
 2. Create a Realtime Database.
-3. Review and deploy `database.rules.json` from the Firebase Console or CLI. The included rules match the legacy data model and require the chat-list query to filter by the signed-in user's participant path. The app then keeps only a one-message query and unread listener per relevant conversation; the full message listener exists only for the open chat. A future migration can add `userChats/{uid}/{chatId}` for fully indexed per-user discovery reads.
+3. Review and deploy `database.rules.json` from the Firebase Console or CLI. Relay now keeps a lightweight `userChats/{uid}/{chatId}` index, reads only each conversation's `lastMessage` and current user's unread count for the sidebar, and subscribes to the full message list only for the open chat. On the first load after this update, each existing user performs one legacy chat lookup to populate the index; later loads use only the index.
 4. Add the development and production hosts to Authentication → Authorized domains.
 5. Existing messages remain compatible when `type`, `text`, or `seenBy` fields are missing.
 
@@ -74,7 +74,7 @@ When a new service worker is ready, Relay shows **Update available — Refresh**
 
 ## Notifications
 
-Notifications are requested only when the user enables them in Profile → Settings. While Relay is running, an incoming message can create a browser notification when the tab is hidden; clicking it focuses Relay and opens the conversation. Own messages and visible-tab messages are excluded, and previews are truncated.
+Notifications are requested only when the user enables them in Profile → Settings. While Relay is running, an incoming message in any conversation can create a service-worker notification when Relay is hidden or unfocused. If that exact chat is visible and focused, the notification is suppressed. Clicking a notification focuses or opens Relay and navigates to the conversation. Initial listener hydration, own messages, and duplicate message IDs are excluded, and text previews are sanitized and truncated.
 
 True notifications when the app is fully closed require Firebase Cloud Messaging, a VAPID key, a messaging service worker, and a trusted backend/Cloud Function that sends FCM messages. Those pieces are intentionally not faked or included here.
 
@@ -89,6 +89,8 @@ chats/{chatId}/participants/{uid}
 chats/{chatId}/messages/{messageId}
 chats/{chatId}/unread/{uid}
 chats/{chatId}/typing/{uid}
+userChats/{uid}/{chatId}
+userChatIndexVersion/{uid}
 ```
 
 New messages use `sender`, `text`, `type`, `imageURL`, `time`, and `seenBy`. The deterministic chat ID remains the two user IDs sorted and joined by `_`.

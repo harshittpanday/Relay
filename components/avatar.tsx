@@ -1,7 +1,9 @@
-import { useState } from 'react';
+'use client';
+
+import { memo, useEffect, useMemo, useState } from 'react';
 import type { ChatUser } from '@/types/chat';
 
-export function Avatar({
+export const Avatar = memo(function Avatar({
   user,
   size = 'md',
   online = false,
@@ -11,29 +13,41 @@ export function Avatar({
   online?: boolean;
 }) {
   const [broken, setBroken] = useState(false);
-  const initials = user.displayName
-    .split(/\s+/)
-    .map((part) => part[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
+  useEffect(() => setBroken(false), [user.pfpURL]);
+  const initials = useMemo(
+    () =>
+      user.displayName
+        .split(/\s+/)
+        .map((part) => part[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase(),
+    [user.displayName],
+  );
   return (
     <span
-      className={`avatar avatar-${size}`}
-      data-tone={
-        Array.from(user.uid).reduce((a, c) => a + c.charCodeAt(0), 0) % 6
-      }
+      className={`avatar-shell avatar-${size}`}
+      aria-label={`${user.displayName}${online ? ', online' : ''}`}
     >
-      {user.pfpURL && !broken ? (
-        <img
-          src={user.pfpURL}
-          alt={`${user.displayName}'s profile`}
-          onError={() => setBroken(true)}
-        />
-      ) : (
-        <span aria-hidden="true">{initials || '?'}</span>
-      )}
+      <span
+        className="avatar"
+        data-tone={
+          Array.from(user.uid).reduce((a, c) => a + c.charCodeAt(0), 0) % 6
+        }
+      >
+        {user.pfpURL && !broken ? (
+          <img
+            src={user.pfpURL}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            onError={() => setBroken(true)}
+          />
+        ) : (
+          <span aria-hidden="true">{initials || '?'}</span>
+        )}
+      </span>
       {online && <i className="presence-dot" aria-label="Online" />}
     </span>
   );
-}
+});

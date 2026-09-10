@@ -33,6 +33,7 @@ export async function signUp(
         email: email.trim(),
         username: normalized,
         displayName: displayName.trim(),
+        displayNameLower: displayName.trim().toLowerCase(),
         bio: '',
         pfpURL: '',
         createdAt: Date.now(),

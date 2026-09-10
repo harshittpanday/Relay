@@ -1,7 +1,10 @@
 'use client';
 import {
+  memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -71,24 +74,61 @@ function ChatAppInner() {
   const toast = useToast();
   const [me, setMe] = useState<ChatUser | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [active, setActive] = useState<Conversation | null>(null);
+  const [activeId, setActiveId] = useState<string>();
+  const [activeFallback, setActiveFallback] = useState<Conversation | null>(
+    null,
+  );
+  const [activeUser, setActiveUser] = useState<ChatUser | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [otherTyping, setOtherTyping] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [visibilityTick, setVisibilityTick] = useState(0);
+  const [attentionTick, setAttentionTick] = useState(0);
   const [notifications, setNotifications] = useState<NotificationState>({
     enabled: false,
     permission: 'unsupported',
+    availability: 'unsupported',
   });
-  const initialMessages = useRef(true);
-  const knownMessageIds = useRef(new Set<string>());
+  const activeIdRef = useRef(activeId);
+  const conversationsRef = useRef<Conversation[]>([]);
+
+  const sortedConversations = useMemo(
+    () =>
+      [...conversations].sort(
+        (a, b) =>
+          (b.updatedAt || b.latestMessage?.time || 0) -
+          (a.updatedAt || a.latestMessage?.time || 0),
+      ),
+    [conversations],
+  );
+  const baseActive = useMemo(
+    () =>
+      sortedConversations.find((item) => item.id === activeId) ||
+      (activeFallback?.id === activeId ? activeFallback : null),
+    [activeFallback, activeId, sortedConversations],
+  );
+  const active = useMemo(
+    () =>
+      baseActive && activeUser?.uid === baseActive.otherUser.uid
+        ? { ...baseActive, otherUser: activeUser }
+        : baseActive,
+    [activeUser, baseActive],
+  );
+  activeIdRef.current = activeId;
+  conversationsRef.current = sortedConversations;
 
   useEffect(() => setNotifications(getNotificationState()), []);
   useEffect(() => {
-    const changed = () => setVisibilityTick((value) => value + 1);
+    const changed = () => {
+      setAttentionTick((value) => value + 1);
+      setNotifications(getNotificationState());
+    };
     document.addEventListener('visibilitychange', changed);
-    return () => document.removeEventListener('visibilitychange', changed);
+    window.addEventListener('focus', changed);
+    return () => {
+      document.removeEventListener('visibilitychange', changed);
+      window.removeEventListener('focus', changed);
+    };
   }, []);
   useEffect(() => {
     if (!authUser) {
@@ -104,39 +144,41 @@ function ChatAppInner() {
   }, [authUser]);
   useEffect(() => {
     if (!authUser) return;
-    return subscribeConversations(authUser.uid, setConversations, (error) =>
-      toast(friendlyError(error), 'error'),
+    return subscribeConversations(
+      authUser.uid,
+      setConversations,
+      (error) => toast(friendlyError(error), 'error'),
+      (conversation, message) => {
+        const relevantChatVisible =
+          activeIdRef.current === conversation.id &&
+          document.visibilityState === 'visible' &&
+          document.hasFocus();
+        void notifyIncoming(
+          conversation.otherUser,
+          message,
+          conversation.id,
+          authUser.uid,
+          relevantChatVisible,
+        );
+      },
     );
   }, [authUser, toast]);
   useEffect(() => {
-    if (!active) return;
-    const fresh = conversations.find((item) => item.id === active.id);
-    if (fresh) setActive(fresh);
-  }, [conversations, active?.id]);
+    if (!baseActive) {
+      setActiveUser(null);
+      return;
+    }
+    return subscribeUser(baseActive.otherUser.uid, setActiveUser);
+  }, [baseActive?.otherUser.uid]);
   useEffect(() => {
     if (!active) {
       setMessages([]);
       return;
     }
     setMessagesLoading(true);
-    initialMessages.current = true;
-    knownMessageIds.current.clear();
     const stopMessages = subscribeMessages(
       active.id,
       (next) => {
-        if (initialMessages.current) {
-          next.forEach((m) => knownMessageIds.current.add(m.id));
-          initialMessages.current = false;
-        } else {
-          next
-            .filter(
-              (m) =>
-                !knownMessageIds.current.has(m.id) &&
-                m.sender !== authUser?.uid,
-            )
-            .forEach((m) => notifyIncoming(active.otherUser, m, active.id));
-          next.forEach((m) => knownMessageIds.current.add(m.id));
-        }
         setMessages(next);
         setMessagesLoading(false);
       },
@@ -150,37 +192,44 @@ function ChatAppInner() {
       active.otherUser.uid,
       setOtherTyping,
     );
-    const stopUser = subscribeUser(active.otherUser.uid, (otherUser) =>
-      setActive((current) =>
-        current?.id === active.id ? { ...current, otherUser } : current,
-      ),
-    );
     return () => {
       stopMessages();
       stopTyping();
-      stopUser();
-      setTyping(active.id, authUser!.uid, false).catch(() => undefined);
     };
-  }, [active?.id, authUser?.uid, toast]);
+  }, [active?.id, toast]);
   useEffect(() => {
     if (
       !active ||
       !authUser ||
       document.visibilityState !== 'visible' ||
+      !document.hasFocus() ||
       !messages.length
     )
       return;
-    markChatRead(active.id, authUser.uid, messages).catch(() => undefined);
-  }, [active?.id, authUser, messages, visibilityTick]);
+    const hasUnread = Boolean(active.unread?.[authUser.uid]);
+    const hasUnseen = messages.some(
+      (message) =>
+        message.sender !== authUser.uid && !message.seenBy[authUser.uid],
+    );
+    if (hasUnread || hasUnseen)
+      markChatRead(active.id, authUser.uid, messages).catch(() => undefined);
+  }, [active?.id, active?.unread, authUser, messages, attentionTick]);
   useEffect(() => {
     const openFromHash = () => {
       const id = location.hash.match(/chat=([^&]+)/)?.[1];
       if (id) {
-        const match = conversations.find(
-          (item) => item.id === decodeURIComponent(id),
+        const decoded = decodeURIComponent(id);
+        const match = conversationsRef.current.find(
+          (item) => item.id === decoded,
         );
-        if (match) setActive(match);
-      } else setActive(null);
+        if (match) {
+          setActiveId(decoded);
+          setActiveFallback(match);
+        }
+      } else {
+        setActiveId(undefined);
+        setActiveFallback(null);
+      }
     };
     openFromHash();
     window.addEventListener('hashchange', openFromHash);
@@ -189,10 +238,21 @@ function ChatAppInner() {
       window.removeEventListener('hashchange', openFromHash);
       window.removeEventListener('popstate', openFromHash);
     };
-  }, [conversations]);
+  }, []);
+  useEffect(() => {
+    const id = location.hash.match(/chat=([^&]+)/)?.[1];
+    if (!id || activeIdRef.current) return;
+    const decoded = decodeURIComponent(id);
+    const match = sortedConversations.find((item) => item.id === decoded);
+    if (match) {
+      setActiveId(decoded);
+      setActiveFallback(match);
+    }
+  }, [sortedConversations]);
 
   const selectConversation = useCallback((conversation: Conversation) => {
-    setActive(conversation);
+    setActiveId(conversation.id);
+    setActiveFallback(conversation);
     history.pushState(
       { chatId: conversation.id },
       '',
@@ -200,9 +260,32 @@ function ChatAppInner() {
     );
   }, []);
   const closeConversation = useCallback(() => {
-    setActive(null);
+    setActiveId(undefined);
+    setActiveFallback(null);
     history.pushState({}, '', location.pathname);
   }, []);
+  const openSettings = useCallback(() => setProfileOpen(true), []);
+  const startConversation = useCallback(
+    async (other: ChatUser) => {
+      if (!me) return;
+      try {
+        const chatId = await ensureChat(me.uid, other.uid);
+        const existing = conversationsRef.current.find(
+          (item) => item.id === chatId,
+        );
+        selectConversation(
+          existing || {
+            id: chatId,
+            participants: { [me.uid]: true, [other.uid]: true },
+            otherUser: other,
+          },
+        );
+      } catch (error) {
+        toast(friendlyError(error), 'error');
+      }
+    },
+    [me, selectConversation, toast],
+  );
 
   if (!firebaseConfigured) return <ConfigMissing />;
   if (authLoading || (authUser && !me)) return <LoadingScreen />;
@@ -212,25 +295,11 @@ function ChatAppInner() {
     <main className={`app-shell ${active ? 'chat-open' : ''}`}>
       <Sidebar
         me={me}
-        conversations={conversations}
+        conversations={sortedConversations}
         activeId={active?.id}
         onSelect={selectConversation}
-        onSettings={() => setProfileOpen(true)}
-        onNewChat={async (other) => {
-          try {
-            const chatId = await ensureChat(me.uid, other.uid);
-            const existing = conversations.find((item) => item.id === chatId);
-            selectConversation(
-              existing || {
-                id: chatId,
-                participants: { [me.uid]: true, [other.uid]: true },
-                otherUser: other,
-              },
-            );
-          } catch (error) {
-            toast(friendlyError(error), 'error');
-          }
-        }}
+        onSettings={openSettings}
+        onNewChat={startConversation}
       />
       <section className="conversation-pane">
         {active ? (
@@ -281,7 +350,7 @@ function ChatAppInner() {
   );
 }
 
-function Sidebar({
+const Sidebar = memo(function Sidebar({
   me,
   conversations,
   activeId,
@@ -307,15 +376,19 @@ function Sidebar({
       return;
     }
     setSearching(true);
-    const timer = window.setTimeout(
-      () =>
-        searchUsers(query, me.uid)
-          .then(setResults)
-          .catch((error) => toast(friendlyError(error), 'error'))
-          .finally(() => setSearching(false)),
-      300,
-    );
-    return () => clearTimeout(timer);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      searchUsers(query, me.uid)
+        .then((users) => !cancelled && setResults(users))
+        .catch((error) => {
+          if (!cancelled) toast(friendlyError(error), 'error');
+        })
+        .finally(() => !cancelled && setSearching(false));
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [query, me.uid, toast]);
   return (
     <aside className="sidebar">
@@ -373,7 +446,7 @@ function Sidebar({
               conversation={conversation}
               meUid={me.uid}
               active={activeId === conversation.id}
-              onClick={() => onSelect(conversation)}
+              onSelect={onSelect}
             />
           ))
         ) : (
@@ -400,9 +473,9 @@ function Sidebar({
       </footer>
     </aside>
   );
-}
+});
 
-function SearchResults({
+const SearchResults = memo(function SearchResults({
   results,
   searching,
   onSelect,
@@ -448,18 +521,18 @@ function SearchResults({
       ))}
     </>
   );
-}
+});
 
-function ConversationRow({
+const ConversationRow = memo(function ConversationRow({
   conversation,
   meUid,
   active,
-  onClick,
+  onSelect,
 }: {
   conversation: Conversation;
   meUid: string;
   active: boolean;
-  onClick: () => void;
+  onSelect: (conversation: Conversation) => void;
 }) {
   const [user, setUser] = useState(conversation.otherUser);
   useEffect(
@@ -471,7 +544,7 @@ function ConversationRow({
   return (
     <button
       className={`conversation-row ${active ? 'active' : ''}`}
-      onClick={onClick}
+      onClick={() => onSelect(conversation)}
     >
       <Avatar user={user} online={user.online} />
       <span className="conversation-copy">
@@ -495,7 +568,7 @@ function ConversationRow({
       </span>
     </button>
   );
-}
+});
 
 function ConversationView({
   conversation,
@@ -527,15 +600,25 @@ function ConversationView({
   const [failed, setFailed] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
   const picker = useRef<HTMLInputElement>(null);
   const typingTimer = useRef<number | null>(null);
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'end' });
+  const typingActive = useRef(false);
+  useLayoutEffect(() => {
+    if (!stickToBottom.current) return;
+    const frame = requestAnimationFrame(() => {
+      const scroller = scrollRef.current;
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      else endRef.current?.scrollIntoView({ block: 'end' });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [messages.length]);
   useEffect(
     () => () => {
       if (typingTimer.current) clearTimeout(typingTimer.current);
-      setTyping(conversation.id, me.uid, false).catch(() => undefined);
+      if (typingActive.current)
+        setTyping(conversation.id, me.uid, false).catch(() => undefined);
     },
     [conversation.id, me.uid],
   );
@@ -543,13 +626,16 @@ function ConversationView({
     setDraft(value);
     setFailed(false);
     if (typingTimer.current) clearTimeout(typingTimer.current);
-    setTyping(conversation.id, me.uid, Boolean(value.trim())).catch(
-      () => undefined,
-    );
-    typingTimer.current = window.setTimeout(
-      () => setTyping(conversation.id, me.uid, false).catch(() => undefined),
-      3000,
-    );
+    const shouldType = Boolean(value.trim());
+    if (shouldType !== typingActive.current) {
+      typingActive.current = shouldType;
+      setTyping(conversation.id, me.uid, shouldType).catch(() => undefined);
+    }
+    if (shouldType)
+      typingTimer.current = window.setTimeout(() => {
+        typingActive.current = false;
+        setTyping(conversation.id, me.uid, false).catch(() => undefined);
+      }, 3000);
   }
   async function sendText() {
     const text = draft.trim();
@@ -559,7 +645,14 @@ function ConversationView({
       setFailed(false);
       await sendMessage(conversation.id, me.uid, other.uid, { text });
       setDraft('');
-      await setTyping(conversation.id, me.uid, false);
+      if (typingTimer.current) {
+        clearTimeout(typingTimer.current);
+        typingTimer.current = null;
+      }
+      if (typingActive.current) {
+        typingActive.current = false;
+        await setTyping(conversation.id, me.uid, false);
+      }
     } catch (error) {
       setFailed(true);
       toast(friendlyError(error), 'error');
@@ -609,7 +702,15 @@ function ConversationView({
           <MoreHorizontal />
         </button>
       </header>
-      <div className="message-scroll">
+      <div
+        ref={scrollRef}
+        className="message-scroll"
+        onScroll={(event) => {
+          const target = event.currentTarget;
+          stickToBottom.current =
+            target.scrollHeight - target.scrollTop - target.clientHeight < 120;
+        }}
+      >
         {loading ? (
           <MessageSkeleton />
         ) : !messages.length ? (
@@ -686,7 +787,7 @@ function ConversationView({
   );
 }
 
-function MessageList({
+const MessageList = memo(function MessageList({
   messages,
   meUid,
   other,
@@ -738,6 +839,7 @@ function MessageList({
                     <img
                       src={message.imageURL}
                       loading="lazy"
+                      decoding="async"
                       alt="Shared attachment"
                     />
                     <span>
@@ -765,7 +867,7 @@ function MessageList({
       })}
     </div>
   );
-}
+});
 
 function MessageSkeleton() {
   return (

@@ -13,6 +13,9 @@ export function usePwa() {
     if (!('serviceWorker' in navigator)) return;
 
     let isReloading = false;
+    let disposed = false;
+    let activeRegistration: ServiceWorkerRegistration | undefined;
+    let updateFound: (() => void) | undefined;
     const reloadOnUpdate = () => {
       if (isReloading) return;
       isReloading = true;
@@ -24,26 +27,41 @@ export function usePwa() {
       reloadOnUpdate,
     );
 
-    void navigator.serviceWorker.register('/sw.js').then((registration) => {
-      const offerUpdate = () => {
-        const worker = registration.waiting;
-        if (!worker) return;
-        setUpdateReady(true);
-        setApplyUpdate(() => () =>
-          worker.postMessage({ type: 'SKIP_WAITING' }),
-        );
-      };
+    void navigator.serviceWorker
+      .register('/sw.js')
+      .then((registration) => {
+        if (disposed) return;
+        activeRegistration = registration;
+        const offerUpdate = () => {
+          const worker = registration.waiting;
+          if (!worker) return;
+          setUpdateReady(true);
+          setApplyUpdate(
+            () => () => worker.postMessage({ type: 'SKIP_WAITING' }),
+          );
+        };
 
-      offerUpdate();
-      registration.addEventListener('updatefound', () => {
-        const worker = registration.installing;
-        worker?.addEventListener('statechange', () => {
-          if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-            offerUpdate();
-          }
-        });
+        offerUpdate();
+        updateFound = () => {
+          const worker = registration.installing;
+          if (!worker) return;
+          const stateChanged = () => {
+            if (
+              worker.state === 'installed' &&
+              navigator.serviceWorker.controller
+            ) {
+              offerUpdate();
+            }
+            if (worker.state === 'installed' || worker.state === 'redundant')
+              worker.removeEventListener('statechange', stateChanged);
+          };
+          worker.addEventListener('statechange', stateChanged);
+        };
+        registration.addEventListener('updatefound', updateFound);
+      })
+      .catch((error) => {
+        console.warn('[Relay PWA] Service worker registration failed', error);
       });
-    });
 
     const capture = (event: Event) => {
       event.preventDefault();
@@ -55,6 +73,9 @@ export function usePwa() {
     window.addEventListener('appinstalled', installed);
 
     return () => {
+      disposed = true;
+      if (activeRegistration && updateFound)
+        activeRegistration.removeEventListener('updatefound', updateFound);
       navigator.serviceWorker.removeEventListener(
         'controllerchange',
         reloadOnUpdate,

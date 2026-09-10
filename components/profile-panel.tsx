@@ -74,6 +74,16 @@ export function ProfilePanel({
       toast(friendlyError(error), 'error');
     }
   }
+  const notificationStatus =
+    notifications.availability === 'unsupported'
+      ? 'Not supported by this browser'
+      : notifications.availability === 'insecure'
+        ? 'Requires a secure HTTPS connection'
+        : notifications.permission === 'denied'
+          ? 'Blocked — allow notifications in browser settings'
+          : notifications.enabled
+            ? 'On while Relay is running'
+            : 'Off — select to enable';
   return (
     <div className="panel-backdrop">
       <aside className="profile-panel" aria-label="Profile and settings">
@@ -139,17 +149,14 @@ export function ProfilePanel({
           </button>
         </form>
         <div className="settings-list">
-          <button onClick={toggleNotifications}>
+          <button
+            onClick={toggleNotifications}
+            disabled={notifications.availability !== 'ready'}
+          >
             {notifications.enabled ? <Bell size={19} /> : <BellOff size={19} />}
             <span>
               <strong>Message notifications</strong>
-              <small>
-                {notifications.permission === 'denied'
-                  ? 'Blocked in browser settings'
-                  : notifications.enabled
-                    ? 'On while Relay is running'
-                    : 'Off'}
-              </small>
+              <small>{notificationStatus}</small>
             </span>
             <i className={notifications.enabled ? 'switch on' : 'switch'} />
           </button>

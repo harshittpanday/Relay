@@ -39,9 +39,11 @@ export interface Chat {
   unread?: Record<string, number>;
   typing?: TypingState;
   lastMessage?: {
+    id?: string;
     text: string;
     type: MessageType;
     sender: string;
+    imageURL?: string;
     time: number;
   };
   updatedAt?: number;
@@ -53,6 +55,7 @@ export interface Conversation extends Chat {
 export interface NotificationState {
   enabled: boolean;
   permission: NotificationPermission | 'unsupported';
+  availability: 'ready' | 'unsupported' | 'insecure';
 }
 export interface PendingMessage {
   id: string;
