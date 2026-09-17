@@ -10,25 +10,34 @@ import { database } from '@/lib/firebase';
 
 export function connectPresence(uid: string) {
   const connectedRef = ref(database, '.info/connected');
-  const userRef = ref(database, `users/${uid}`);
-  const disconnect = onDisconnect(userRef);
+  const rootRef = ref(database);
+  const disconnect = onDisconnect(rootRef);
   let closed = false;
   const unsubscribe = onValue(connectedRef, async (snapshot) => {
     if (snapshot.val() !== true) return;
     await disconnect.update({
-      online: false,
-      lastSeen: serverTimestamp(),
+      [`users/${uid}/online`]: false,
+      [`users/${uid}/lastSeen`]: serverTimestamp(),
+      [`publicProfiles/${uid}/online`]: false,
+      [`publicProfiles/${uid}/lastSeen`]: serverTimestamp(),
     });
     if (closed) return;
-    await update(userRef, { online: true, lastSeen: serverTimestamp() });
+    await update(rootRef, {
+      [`users/${uid}/online`]: true,
+      [`users/${uid}/lastSeen`]: serverTimestamp(),
+      [`publicProfiles/${uid}/online`]: true,
+      [`publicProfiles/${uid}/lastSeen`]: serverTimestamp(),
+    });
   });
   return () => {
     closed = true;
     unsubscribe();
     void disconnect.cancel();
-    void update(userRef, {
-      online: false,
-      lastSeen: serverTimestamp(),
+    void update(rootRef, {
+      [`users/${uid}/online`]: false,
+      [`users/${uid}/lastSeen`]: serverTimestamp(),
+      [`publicProfiles/${uid}/online`]: false,
+      [`publicProfiles/${uid}/lastSeen`]: serverTimestamp(),
     });
   };
 }

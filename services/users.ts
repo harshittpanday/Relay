@@ -6,11 +6,14 @@ import {
   orderByChild,
   query,
   ref,
+  runTransaction,
   startAt,
   update,
 } from 'firebase/database';
 import { database } from '@/lib/firebase';
 import type { ChatUser } from '@/types/chat';
+
+const profileRef = (uid: string) => ref(database, `publicProfiles/${uid}`);
 
 const cache = new Map<string, ChatUser>();
 const pendingReads = new Map<string, Promise<ChatUser>>();
@@ -31,15 +34,39 @@ const normalize = (uid: string, value: Partial<ChatUser> | null): ChatUser => ({
   pfpURL: value?.pfpURL || '',
   online: Boolean(value?.online),
   lastSeen: value?.lastSeen,
-  email: value?.email,
 });
+export async function ensurePublicProfile(uid: string) {
+  if ((await get(profileRef(uid))).exists()) return;
+  const legacy = (
+    await get(ref(database, `users/${uid}`))
+  ).val() as Partial<ChatUser> | null;
+  if (!legacy?.username || !legacy.displayName) return;
+  const username = legacy.username.trim().toLowerCase();
+  const claim = await runTransaction(
+    ref(database, `usernames/${username}`),
+    (current) => (current === null ? uid : undefined),
+    { applyLocally: false },
+  );
+  if (!claim.committed && claim.snapshot.val() !== uid)
+    throw new Error('Your username is assigned to another account.');
+  await update(profileRef(uid), {
+    username,
+    displayName: legacy.displayName,
+    displayNameLower: legacy.displayName.toLowerCase(),
+    bio: legacy.bio || '',
+    pfpURL: legacy.pfpURL || '',
+    createdAt: legacy.createdAt || Date.now(),
+    online: Boolean(legacy.online),
+    ...(legacy.lastSeen ? { lastSeen: legacy.lastSeen } : {}),
+  });
+}
 export async function getUser(uid: string) {
   if (cache.has(uid)) return cache.get(uid)!;
   const active = subscriptions.get(uid)?.user;
   if (active) return active;
   const existing = pendingReads.get(uid);
   if (existing) return existing;
-  const read = get(ref(database, `users/${uid}`)).then((snapshot) => {
+  const read = get(profileRef(uid)).then((snapshot) => {
     const user = normalize(uid, snapshot.val());
     cache.set(uid, user);
     return user;
@@ -60,7 +87,8 @@ export function subscribeUser(uid: string, callback: (user: ChatUser) => void) {
       stop: () => void;
       user?: ChatUser;
     } = { listeners, stop: () => undefined, user: cache.get(uid) };
-    next.stop = onValue(ref(database, `users/${uid}`), (snapshot) => {
+    next.stop = onValue(profileRef(uid), (snapshot) => {
+      if (!snapshot.exists()) return;
       const user = normalize(uid, snapshot.val());
       next.user = user;
       cache.set(uid, user);
@@ -89,11 +117,8 @@ export async function searchUsers(term: string, currentUid: string) {
   const cached = searchCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) return cached.users;
 
-  const usersRef = ref(database, 'users');
+  const usersRef = ref(database, 'publicProfiles');
   const upperBound = `${normalizedTerm}\uf8ff`;
-  const titleCaseTerm = normalizedTerm.replace(/\b\w/g, (letter) =>
-    letter.toUpperCase(),
-  );
   const searches = [
     get(
       query(
@@ -113,19 +138,6 @@ export async function searchUsers(term: string, currentUid: string) {
         limitToFirst(12),
       ),
     ),
-    ...[displayTerm, titleCaseTerm]
-      .filter((value, index, values) => values.indexOf(value) === index)
-      .map((value) =>
-        get(
-          query(
-            usersRef,
-            orderByChild('displayName'),
-            startAt(value),
-            endAt(`${value}\uf8ff`),
-            limitToFirst(12),
-          ),
-        ),
-      ),
   ];
   const snapshots = await Promise.all(searches);
   const matches = new Map<string, ChatUser>();
@@ -145,7 +157,15 @@ export const updateUserProfile = (
   uid: string,
   data: Pick<ChatUser, 'displayName' | 'bio' | 'pfpURL'>,
 ) =>
-  update(ref(database, `users/${uid}`), {
-    ...data,
-    displayNameLower: data.displayName.trim().toLowerCase(),
+  update(ref(database), {
+    [`users/${uid}/displayName`]: data.displayName,
+    [`users/${uid}/displayNameLower`]: data.displayName.trim().toLowerCase(),
+    [`users/${uid}/bio`]: data.bio,
+    [`users/${uid}/pfpURL`]: data.pfpURL,
+    [`publicProfiles/${uid}/displayName`]: data.displayName,
+    [`publicProfiles/${uid}/displayNameLower`]: data.displayName
+      .trim()
+      .toLowerCase(),
+    [`publicProfiles/${uid}/bio`]: data.bio,
+    [`publicProfiles/${uid}/pfpURL`]: data.pfpURL,
   });

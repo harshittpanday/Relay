@@ -45,7 +45,11 @@ import {
   subscribeMessages,
   subscribeTyping,
 } from '@/services/chats';
-import { searchUsers, subscribeUser } from '@/services/users';
+import {
+  ensurePublicProfile,
+  searchUsers,
+  subscribeUser,
+} from '@/services/users';
 import { uploadImage } from '@/services/uploads';
 import { getNotificationState, notifyIncoming } from '@/services/notifications';
 import type {
@@ -135,13 +139,19 @@ function ChatAppInner() {
       setMe(null);
       return;
     }
+    setMe((current) => (current?.uid === authUser.uid ? current : null));
     const stopUser = subscribeUser(authUser.uid, setMe);
-    const stopPresence = connectPresence(authUser.uid);
+    void ensurePublicProfile(authUser.uid).catch((error) =>
+      toast(friendlyError(error), 'error'),
+    );
     return () => {
       stopUser();
-      stopPresence();
     };
-  }, [authUser]);
+  }, [authUser, toast]);
+  useEffect(() => {
+    if (!authUser || me?.uid !== authUser.uid) return;
+    return connectPresence(authUser.uid);
+  }, [authUser, me?.uid]);
   useEffect(() => {
     if (!authUser) return;
     return subscribeConversations(

@@ -3,14 +3,42 @@
     ".read": false,
     ".write": false,
     "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "publicProfiles": {
       ".read": "auth != null",
-      ".indexOn": ["username", "displayName", "displayNameLower"],
-      "$uid": { ".write": "auth != null && auth.uid === $uid" }
+      ".indexOn": ["username", "displayNameLower"],
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['username', 'displayName', 'displayNameLower']) && newData.child('username').isString() && newData.child('displayName').isString() && newData.child('displayNameLower').isString() && (!data.exists() || newData.child('username').val() === data.child('username').val()) && root.child('usernames').child(newData.child('username').val()).val() === $uid",
+        "username": {
+          ".validate": "newData.isString() && newData.val().length >= 3 && newData.val().length <= 24"
+        },
+        "displayName": {
+          ".validate": "newData.isString() && newData.val().length >= 2 && newData.val().length <= 80"
+        },
+        "displayNameLower": {
+          ".validate": "newData.isString() && newData.val().length >= 2 && newData.val().length <= 80"
+        },
+        "bio": {
+          ".validate": "newData.isString() && newData.val().length <= 500"
+        },
+        "pfpURL": {
+          ".validate": "newData.isString() && newData.val().length <= 2048"
+        },
+        "createdAt": { ".validate": "newData.isNumber()" },
+        "online": { ".validate": "newData.isBoolean()" },
+        "lastSeen": { ".validate": "newData.isNumber()" },
+        "$other": { ".validate": false }
+      }
     },
     "usernames": {
-      ".read": "auth != null",
       "$username": {
-        ".write": "auth != null && (!data.exists() || data.val() === auth.uid)"
+        ".read": "auth != null",
+        ".write": "auth != null && ((!data.exists() && newData.val() === auth.uid && (!root.child('users').child(auth.uid).exists() || root.child('users').child(auth.uid).child('username').val() === $username)) || (data.val() === auth.uid && !newData.exists() && !root.child('users').child(auth.uid).exists()))"
       }
     },
     "chats": {
