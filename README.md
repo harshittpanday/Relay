@@ -60,28 +60,11 @@ Optional image-upload variables:
 
 1. Enable Email/Password under Firebase Authentication.
 2. Create a Realtime Database.
-3. For an existing database, backfill public profiles **before** deploying the new rules (see below). Then review and deploy `database.rules.json` from the Firebase Console or CLI. Relay keeps a lightweight `userChats/{uid}/{chatId}` index, reads only each conversation's `lastMessage` and current user's unread count for the sidebar, and subscribes to the full message list only for the open chat. On the first load after this update, each existing user performs one legacy chat lookup to populate the index; later loads use only the index.
+3. Review and deploy `database.rules.json` from the Firebase Console or CLI. Relay now keeps a lightweight `userChats/{uid}/{chatId}` index, reads only each conversation's `lastMessage` and current user's unread count for the sidebar, and subscribes to the full message list only for the open chat. On the first load after this update, each existing user performs one legacy chat lookup to populate the index; later loads use only the index.
 4. Add the development and production hosts to Authentication → Authorized domains.
 5. Existing messages remain compatible when `type`, `text`, or `seenBy` fields are missing.
 
 The app extends existing records safely with `lastSeen`, `updatedAt`, and `lastMessage`. Usernames remain immutable in the UI so the existing `usernames/{username}` mapping cannot drift.
-
-### Public profile migration
-
-Search reads `publicProfiles/{uid}`, which contains only username, display name, bio, avatar URL, and presence metadata. The existing `users/{uid}` records remain intact but are readable only by their owner; legacy email fields are never copied to the public directory. New signups create both records in one database update after claiming the username. Existing users also populate their own public record on login, but an administrative backfill makes _inactive_ existing users discoverable immediately.
-
-Using an administrator's Application Default Credentials, run the dry run and then apply it to the **correct** Realtime Database URL. Do not put service-account credentials in `VITE_` environment variables or commit them.
-
-```bash
-node scripts/backfill-public-profiles.mjs --database-url=https://YOUR-PROJECT-default-rtdb.firebaseio.com
-node scripts/backfill-public-profiles.mjs --database-url=https://YOUR-PROJECT-default-rtdb.firebaseio.com --apply
-```
-
-The script only adds missing public profiles and username mappings. It stops on missing profile names or username collisions so existing data is not silently overwritten. After the backfill, deploy the new rules; otherwise new search reads will be denied by the live rules. Existing private `/users` records are not deleted.
-
-If startup reports `onValue /publicProfiles/{uid}: PERMISSION_DENIED`, the deployed Realtime Database rules do not yet allow the new profile listener. Relay can open from the signed-in user's own legacy `/users/{uid}` record while those rules are pending, but directory search still requires the `publicProfiles` rules to be deployed. The backfill is only needed to make existing accounts that have not logged in since the change searchable; it is not required for a returning user's own profile to load.
-
-User search makes two bounded reads at `/publicProfiles`: one ordered by `username`, one by `displayNameLower`, each with `startAt`, `endAt`, and `limitToFirst(12)`. The deployed rules must grant `".read": "auth != null"` **at `/publicProfiles` itself**, not just at `/publicProfiles/$uid`, and set `".indexOn": ["username", "displayNameLower"]` at that collection path. A child-only read rule does not authorize a collection query. The indexes improve query efficiency; a `PERMISSION_DENIED` response indicates the read authorization (or the database endpoint) is wrong, not merely a missing index. Check that the rules are deployed to the same Realtime Database instance as `VITE_FIREBASE_DATABASE_URL`.
 
 ## PWA and offline behavior
 
@@ -101,7 +84,6 @@ The app continues to use:
 
 ```text
 users/{uid}
-publicProfiles/{uid}
 usernames/{username}
 chats/{chatId}/participants/{uid}
 chats/{chatId}/messages/{messageId}

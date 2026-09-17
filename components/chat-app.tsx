@@ -45,12 +45,7 @@ import {
   subscribeMessages,
   subscribeTyping,
 } from '@/services/chats';
-import {
-  searchUsers,
-  subscribeCurrentUser,
-  subscribeUser,
-} from '@/services/users';
-import { logOut } from '@/services/auth';
+import { searchUsers, subscribeUser } from '@/services/users';
 import { uploadImage } from '@/services/uploads';
 import { getNotificationState, notifyIncoming } from '@/services/notifications';
 import type {
@@ -73,13 +68,11 @@ export function ChatApp() {
 }
 
 function ChatAppInner() {
-  const { user: authUser, loading: authLoading, error: authError } = useAuth();
+  const { user: authUser, loading: authLoading } = useAuth();
   const network = useNetwork();
   const pwa = usePwa();
   const toast = useToast();
   const [me, setMe] = useState<ChatUser | null>(null);
-  const [startupError, setStartupError] = useState<Error | null>(null);
-  const [startupAttempt, setStartupAttempt] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [activeFallback, setActiveFallback] = useState<Conversation | null>(
@@ -140,42 +133,15 @@ function ChatAppInner() {
   useEffect(() => {
     if (!authUser) {
       setMe(null);
-      setStartupError(null);
       return;
     }
-    setMe((current) => (current?.uid === authUser.uid ? current : null));
-    setStartupError(null);
-    let profileReady = false;
-    let timeout: number | undefined;
-    const stopUser = subscribeCurrentUser(
-      authUser.uid,
-      (user) => {
-        profileReady = true;
-        window.clearTimeout(timeout);
-        setMe(user);
-        setStartupError(null);
-      },
-      setStartupError,
-    );
-    if (!profileReady)
-      timeout = window.setTimeout(() => {
-        setStartupError(
-          (current) =>
-            current ||
-            new Error(
-              `Profile initialization timed out. Check onValue /publicProfiles/${authUser.uid} and /users/${authUser.uid}.`,
-            ),
-        );
-      }, 15000);
+    const stopUser = subscribeUser(authUser.uid, setMe);
+    const stopPresence = connectPresence(authUser.uid);
     return () => {
       stopUser();
-      window.clearTimeout(timeout);
+      stopPresence();
     };
-  }, [authUser, startupAttempt]);
-  useEffect(() => {
-    if (!authUser || me?.uid !== authUser.uid) return;
-    return connectPresence(authUser.uid);
-  }, [authUser, me?.uid]);
+  }, [authUser]);
   useEffect(() => {
     if (!authUser) return;
     return subscribeConversations(
@@ -322,20 +288,6 @@ function ChatAppInner() {
   );
 
   if (!firebaseConfigured) return <ConfigMissing />;
-  if (authError)
-    return (
-      <StartupFailure
-        error={authError}
-        onRetry={() => window.location.reload()}
-      />
-    );
-  if (startupError && authUser && !me)
-    return (
-      <StartupFailure
-        error={startupError}
-        onRetry={() => setStartupAttempt((value) => value + 1)}
-      />
-    );
   if (authLoading || (authUser && !me)) return <LoadingScreen />;
   if (!authUser || !me) return <AuthScreen />;
 
@@ -950,31 +902,6 @@ function LoadingScreen() {
       </div>
       <span className="spinner" />
       <p>Opening Relay…</p>
-    </main>
-  );
-}
-function StartupFailure({
-  error,
-  onRetry,
-}: {
-  error: Error;
-  onRetry: () => void;
-}) {
-  return (
-    <main className="config-missing" role="alert">
-      <div className="brand-mark">
-        <MessageCircleMore />
-      </div>
-      <h1>Relay could not open your profile</h1>
-      <p>{error.message}</p>
-      <p>
-        Retry once your connection or Firebase rules are available. Your account
-        and chats have not been deleted.
-      </p>
-      <div className="startup-actions">
-        <button onClick={onRetry}>Retry</button>
-        <button onClick={() => void logOut()}>Sign out</button>
-      </div>
     </main>
   );
 }

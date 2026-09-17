@@ -5,7 +5,7 @@ import {
   signOut,
   updateProfile,
 } from 'firebase/auth';
-import { ref, runTransaction, update } from 'firebase/database';
+import { ref, runTransaction, set } from 'firebase/database';
 import { auth, database } from '@/lib/firebase';
 
 export async function signUp(
@@ -28,20 +28,19 @@ export async function signUp(
     );
     if (!claim.committed) throw new Error('That username is already taken.');
     usernameClaimed = true;
-    await updateProfile(credential.user, { displayName: displayName.trim() });
-    const profile = {
-      username: normalized,
-      displayName: displayName.trim(),
-      displayNameLower: displayName.trim().toLowerCase(),
-      bio: '',
-      pfpURL: '',
-      createdAt: Date.now(),
-      online: false,
-    };
-    await update(ref(database), {
-      [`users/${credential.user.uid}`]: profile,
-      [`publicProfiles/${credential.user.uid}`]: profile,
-    });
+    await Promise.all([
+      set(ref(database, `users/${credential.user.uid}`), {
+        email: email.trim(),
+        username: normalized,
+        displayName: displayName.trim(),
+        displayNameLower: displayName.trim().toLowerCase(),
+        bio: '',
+        pfpURL: '',
+        createdAt: Date.now(),
+        online: false,
+      }),
+      updateProfile(credential.user, { displayName: displayName.trim() }),
+    ]);
   } catch (error) {
     if (usernameClaimed)
       await runTransaction(usernameRef, (current) =>
