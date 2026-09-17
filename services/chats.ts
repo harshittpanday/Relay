@@ -14,8 +14,41 @@ import {
   update,
 } from 'firebase/database';
 import { database } from '@/lib/firebase';
+import { logDatabaseError } from '@/lib/database-error';
 import { subscribeUser } from './users';
-import type { Chat, Conversation, Message } from '@/types/chat';
+import type { Chat, Conversation, Message, ReplyReference } from '@/types/chat';
+
+export const MAX_MESSAGE_LENGTH = 4000;
+const REPLY_PREVIEW_LENGTH = 160;
+
+const normalizeReply = (value: unknown): ReplyReference | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.messageId !== 'string' ||
+    !raw.messageId ||
+    typeof raw.senderId !== 'string' ||
+    !raw.senderId
+  )
+    return undefined;
+  return {
+    messageId: raw.messageId,
+    senderId: raw.senderId,
+    type: raw.type === 'image' ? 'image' : 'text',
+    text:
+      typeof raw.text === 'string'
+        ? raw.text.slice(0, REPLY_PREVIEW_LENGTH)
+        : '',
+  };
+};
+
+export const replyReference = (message: Message): ReplyReference => ({
+  messageId: message.id,
+  senderId: message.sender,
+  type: message.type,
+  text:
+    message.type === 'image' ? '' : message.text.slice(0, REPLY_PREVIEW_LENGTH),
+});
 
 const normalizeMessage = (id: string, raw: Partial<Message>): Message => ({
   id,
@@ -25,6 +58,11 @@ const normalizeMessage = (id: string, raw: Partial<Message>): Message => ({
   imageURL: raw.imageURL,
   time: Number(raw.time) || Date.now(),
   seenBy: raw.seenBy || {},
+  replyTo: normalizeReply(raw.replyTo),
+  editedAt:
+    typeof raw.editedAt === 'number' && Number.isFinite(raw.editedAt)
+      ? raw.editedAt
+      : undefined,
 });
 
 export function subscribeConversations(
@@ -361,34 +399,99 @@ export async function sendMessage(
   chatId: string,
   senderUid: string,
   otherUid: string,
-  payload: { text?: string; imageURL?: string },
+  payload: { text?: string; imageURL?: string; replyTo?: ReplyReference },
 ) {
+  const text = (payload.text || '').trim();
+  if ((!payload.imageURL && !text) || text.length > MAX_MESSAGE_LENGTH)
+    throw new Error(`Message must be 1–${MAX_MESSAGE_LENGTH} characters.`);
+  const replyTo = payload.replyTo ? normalizeReply(payload.replyTo) : undefined;
+  if (payload.replyTo && !replyTo) throw new Error('Reply target is invalid.');
   const time = Date.now();
   const type = payload.imageURL ? 'image' : 'text';
   const messageRef = push(ref(database, `chats/${chatId}/messages`));
   await set(messageRef, {
     sender: senderUid,
-    text: payload.text || '',
+    text,
     type,
     imageURL: payload.imageURL || null,
     time,
     seenBy: { [senderUid]: true },
+    ...(replyTo ? { replyTo } : {}),
+  }).catch((error: unknown) => {
+    throw logDatabaseError(
+      'send set',
+      `/chats/${chatId}/messages/${messageRef.key}`,
+      error,
+    );
   });
   await Promise.all([
-    update(ref(database, `chats/${chatId}`), {
-      lastMessage: {
+    update(ref(database), {
+      [`chats/${chatId}/lastMessage`]: {
         id: messageRef.key!,
         sender: senderUid,
-        text: payload.text || '',
+        text,
         imageURL: payload.imageURL || null,
         type,
         time,
       },
-      updatedAt: time,
+      [`chats/${chatId}/updatedAt`]: time,
+    }).catch((error: unknown) => {
+      throw logDatabaseError(
+        'send update',
+        `/chats/${chatId}/lastMessage`,
+        error,
+      );
     }),
     runTransaction(
       ref(database, `chats/${chatId}/unread/${otherUid}`),
       (value) => (Number(value) || 0) + 1,
-    ),
+    ).catch((error: unknown) => {
+      throw logDatabaseError(
+        'send unread transaction',
+        `/chats/${chatId}/unread/${otherUid}`,
+        error,
+      );
+    }),
   ]);
+}
+
+export async function editMessage(
+  chatId: string,
+  message: Message,
+  uid: string,
+  nextText: string,
+) {
+  const text = nextText.trim();
+  if (!text || text.length > MAX_MESSAGE_LENGTH)
+    throw new Error(`Message must be 1–${MAX_MESSAGE_LENGTH} characters.`);
+  const path = `chats/${chatId}/messages/${message.id}`;
+  const snapshot = await get(ref(database, path)).catch((error: unknown) => {
+    throw logDatabaseError('edit get', `/${path}`, error);
+  });
+  if (!snapshot.exists())
+    throw new Error('This message is no longer available.');
+  const current = normalizeMessage(message.id, snapshot.val());
+  if (current.sender !== uid || current.type !== 'text' || current.imageURL)
+    throw new Error('This message cannot be edited.');
+  if (current.text !== message.text)
+    throw new Error(
+      'This message changed. Reopen Edit to use its latest text.',
+    );
+  const editedAt = Date.now();
+  await update(ref(database), {
+    [`${path}/text`]: text,
+    [`${path}/editedAt`]: editedAt,
+  }).catch((error: unknown) => {
+    throw logDatabaseError('edit update', `/${path}/text + editedAt`, error);
+  });
+  try {
+    const latest = await get(ref(database, `chats/${chatId}/lastMessage`));
+    if (latest.val()?.id === message.id)
+      await set(ref(database, `chats/${chatId}/lastMessage/text`), text);
+  } catch (error) {
+    console.warn(
+      `[Relay messages] Edited message saved; could not refresh chats/${chatId}/lastMessage`,
+      error,
+    );
+  }
 }

@@ -9,6 +9,7 @@ import {
   useState,
   type ChangeEvent,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import {
   ArrowLeft,
@@ -18,6 +19,8 @@ import {
   MessageCircleMore,
   MoreHorizontal,
   Paperclip,
+  Pencil,
+  Reply,
   Search,
   Send,
   Settings,
@@ -39,7 +42,10 @@ import {
 import { connectPresence, setTyping } from '@/services/presence';
 import {
   ensureChat,
+  editMessage,
   markChatRead,
+  MAX_MESSAGE_LENGTH,
+  replyReference,
   sendMessage,
   subscribeConversations,
   subscribeMessages,
@@ -54,6 +60,17 @@ import type {
   Message,
   NotificationState,
 } from '@/types/chat';
+
+type ComposerMode =
+  | { kind: 'normal' }
+  | { kind: 'reply'; target: Message }
+  | { kind: 'edit'; target: Message; previousDraft: string };
+
+const editableMessage = (message: Message, uid: string) =>
+  message.sender === uid &&
+  message.type === 'text' &&
+  !message.imageURL &&
+  Boolean(message.text.trim());
 import { AuthScreen } from './auth-screen';
 import { Avatar } from './avatar';
 import { ProfilePanel } from './profile-panel';
@@ -595,6 +612,12 @@ function ConversationView({
       : formatPresence(other.lastSeen);
   const toast = useToast();
   const [draft, setDraft] = useState('');
+  const [mode, setMode] = useState<ComposerMode>({ kind: 'normal' });
+  const draftRef = useRef(draft);
+  const modeRef = useRef(mode);
+  draftRef.current = draft;
+  modeRef.current = mode;
+  const [highlightedId, setHighlightedId] = useState<string>();
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -603,6 +626,9 @@ function ConversationView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const picker = useRef<HTMLInputElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const messageNodes = useRef(new Map<string, HTMLDivElement>());
+  const highlightTimer = useRef<number | null>(null);
   const typingTimer = useRef<number | null>(null);
   const typingActive = useRef(false);
   useLayoutEffect(() => {
@@ -619,6 +645,7 @@ function ConversationView({
       if (typingTimer.current) clearTimeout(typingTimer.current);
       if (typingActive.current)
         setTyping(conversation.id, me.uid, false).catch(() => undefined);
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
     },
     [conversation.id, me.uid],
   );
@@ -637,14 +664,93 @@ function ConversationView({
         setTyping(conversation.id, me.uid, false).catch(() => undefined);
       }, 3000);
   }
+  const focusComposer = useCallback(() => {
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, []);
+  const startReply = useCallback(
+    (message: Message) => {
+      const currentMode = modeRef.current;
+      if (currentMode.kind === 'edit') setDraft(currentMode.previousDraft);
+      setMode({ kind: 'reply', target: message });
+      focusComposer();
+    },
+    [focusComposer],
+  );
+  const startEdit = useCallback(
+    (message: Message) => {
+      if (!editableMessage(message, me.uid)) return;
+      const currentMode = modeRef.current;
+      setMode({
+        kind: 'edit',
+        target: message,
+        previousDraft:
+          currentMode.kind === 'edit'
+            ? currentMode.previousDraft
+            : draftRef.current,
+      });
+      setDraft(message.text);
+      focusComposer();
+    },
+    [focusComposer, me.uid],
+  );
+  function cancelMode() {
+    if (mode.kind === 'edit') setDraft(mode.previousDraft);
+    setMode({ kind: 'normal' });
+    focusComposer();
+  }
+  const jumpToOriginal = useCallback(
+    (id: string) => {
+      const node = messageNodes.current.get(id);
+      if (!node) {
+        toast('Original message unavailable', 'error');
+        return;
+      }
+      const reduced = window.matchMedia(
+        '(prefers-reduced-motion: reduce)',
+      ).matches;
+      node.scrollIntoView({
+        behavior: reduced ? 'auto' : 'smooth',
+        block: 'center',
+      });
+      setHighlightedId(id);
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+      highlightTimer.current = window.setTimeout(
+        () => setHighlightedId(undefined),
+        1800,
+      );
+    },
+    [toast],
+  );
+  const registerMessage = useCallback(
+    (id: string, node: HTMLDivElement | null) => {
+      if (node) messageNodes.current.set(id, node);
+      else messageNodes.current.delete(id);
+    },
+    [],
+  );
   async function sendText() {
     const text = draft.trim();
     if (!text || sending || network !== 'online') return;
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      toast(`Keep messages under ${MAX_MESSAGE_LENGTH} characters.`, 'error');
+      return;
+    }
     try {
       setSending(true);
       setFailed(false);
-      await sendMessage(conversation.id, me.uid, other.uid, { text });
-      setDraft('');
+      if (mode.kind === 'edit') {
+        await editMessage(conversation.id, mode.target, me.uid, text);
+        setDraft(mode.previousDraft);
+      } else {
+        await sendMessage(conversation.id, me.uid, other.uid, {
+          text,
+          ...(mode.kind === 'reply'
+            ? { replyTo: replyReference(mode.target) }
+            : {}),
+        });
+        setDraft('');
+      }
+      setMode({ kind: 'normal' });
       if (typingTimer.current) {
         clearTimeout(typingTimer.current);
         typingTimer.current = null;
@@ -667,7 +773,13 @@ function ConversationView({
     try {
       setUploading(true);
       const imageURL = await uploadImage(file);
-      await sendMessage(conversation.id, me.uid, other.uid, { imageURL });
+      await sendMessage(conversation.id, me.uid, other.uid, {
+        imageURL,
+        ...(mode.kind === 'reply'
+          ? { replyTo: replyReference(mode.target) }
+          : {}),
+      });
+      setMode({ kind: 'normal' });
     } catch (error) {
       toast(friendlyError(error), 'error');
     } finally {
@@ -675,6 +787,12 @@ function ConversationView({
     }
   }
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === 'Escape' && mode.kind !== 'normal') {
+      event.preventDefault();
+      cancelMode();
+      return;
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       void sendText();
@@ -724,17 +842,61 @@ function ConversationView({
           <MessageList
             messages={messages}
             meUid={me.uid}
+            me={me}
             other={other}
             onPreview={setPreview}
+            onReply={startReply}
+            onEdit={startEdit}
+            onJump={jumpToOriginal}
+            registerMessage={registerMessage}
+            highlightedId={highlightedId}
           />
         )}
         <div ref={endRef} />
       </div>
       <div className="composer-wrap">
+        {mode.kind !== 'normal' && (
+          <div className="composer-context">
+            <div className="composer-context-icon">
+              {mode.kind === 'reply' ? (
+                <Reply size={17} />
+              ) : (
+                <Pencil size={17} />
+              )}
+            </div>
+            <div>
+              <strong>
+                {mode.kind === 'reply'
+                  ? `Replying to ${mode.target.sender === me.uid ? 'yourself' : other.displayName}`
+                  : 'Editing message'}
+              </strong>
+              <span>
+                {mode.target.type === 'image'
+                  ? 'Photo'
+                  : mode.target.text.slice(0, 120)}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={cancelMode}
+              aria-label={
+                mode.kind === 'reply' ? 'Cancel reply' : 'Cancel edit'
+              }
+            >
+              <X size={17} />
+            </button>
+          </div>
+        )}
         {failed && (
           <div className="send-failed">
-            <span>Message not sent. Your text is still here.</span>
-            <button onClick={sendText}>Retry</button>
+            <span>
+              {mode.kind === 'edit'
+                ? 'Edit not saved. Your text is still here.'
+                : 'Message not sent. Your text is still here.'}
+            </span>
+            <button onClick={sendText}>
+              {mode.kind === 'edit' ? 'Try again' : 'Retry'}
+            </button>
           </div>
         )}
         <div className="composer">
@@ -748,12 +910,13 @@ function ConversationView({
           <button
             className="icon-button"
             onClick={() => picker.current?.click()}
-            disabled={uploading || network !== 'online'}
+            disabled={uploading || mode.kind === 'edit' || network !== 'online'}
             aria-label="Attach image"
           >
             {uploading ? <span className="spinner" /> : <Paperclip />}
           </button>
           <textarea
+            ref={composerRef}
             value={draft}
             onChange={(e) => changed(e.target.value)}
             onKeyDown={onKeyDown}
@@ -761,15 +924,18 @@ function ConversationView({
             placeholder={
               network === 'offline'
                 ? 'Waiting for connection…'
-                : 'Write a message'
+                : mode.kind === 'edit'
+                  ? 'Edit message'
+                  : 'Write a message'
             }
-            aria-label="Message"
+            aria-label={mode.kind === 'edit' ? 'Edit message' : 'Message'}
+            maxLength={MAX_MESSAGE_LENGTH}
           />
           <button
             className="send-button"
             onClick={sendText}
             disabled={!draft.trim() || sending || network !== 'online'}
-            aria-label="Send message"
+            aria-label={mode.kind === 'edit' ? 'Save edit' : 'Send message'}
           >
             {sending ? <span className="spinner dark" /> : <Send size={18} />}
           </button>
@@ -790,13 +956,25 @@ function ConversationView({
 const MessageList = memo(function MessageList({
   messages,
   meUid,
+  me,
   other,
   onPreview,
+  onReply,
+  onEdit,
+  onJump,
+  registerMessage,
+  highlightedId,
 }: {
   messages: Message[];
   meUid: string;
+  me: ChatUser;
   other: ChatUser;
   onPreview: (url: string) => void;
+  onReply: (message: Message) => void;
+  onEdit: (message: Message) => void;
+  onJump: (id: string) => void;
+  registerMessage: (id: string, node: HTMLDivElement | null) => void;
+  highlightedId?: string;
 }) {
   return (
     <div className="messages">
@@ -824,47 +1002,246 @@ const MessageList = memo(function MessageList({
                 <span>{formatDay(message.time)}</span>
               </div>
             )}
-            <div
-              className={`message-line ${mine ? 'mine' : 'theirs'} ${grouped ? 'grouped' : ''}`}
-            >
-              {!mine && !grouped && <Avatar user={other} size="sm" />}
-              <div
-                className={`bubble ${message.type === 'image' ? 'image-bubble' : ''}`}
-              >
-                {message.type === 'image' && message.imageURL ? (
-                  <button
-                    className="message-image"
-                    onClick={() => onPreview(message.imageURL!)}
-                  >
-                    <img
-                      src={message.imageURL}
-                      loading="lazy"
-                      decoding="async"
-                      alt="Shared attachment"
-                    />
-                    <span>
-                      <ImageIcon size={16} /> Open photo
-                    </span>
-                  </button>
-                ) : (
-                  <p>{message.text}</p>
-                )}
-                <span className="message-meta">
-                  <time>{formatMessageTime(message.time)}</time>
-                  {mine && (
-                    <span
-                      title={read ? 'Read' : 'Sent'}
-                      className={read ? 'read' : ''}
-                    >
-                      <CheckCheck size={15} />
-                    </span>
-                  )}
-                </span>
-              </div>
-            </div>
+            <MessageBubble
+              message={message}
+              mine={mine}
+              grouped={Boolean(grouped)}
+              read={read}
+              me={me}
+              other={other}
+              highlighted={highlightedId === message.id}
+              onPreview={onPreview}
+              onReply={onReply}
+              onEdit={onEdit}
+              onJump={onJump}
+              registerMessage={registerMessage}
+            />
           </div>
         );
       })}
+    </div>
+  );
+});
+
+const MessageBubble = memo(function MessageBubble({
+  message,
+  mine,
+  grouped,
+  read,
+  me,
+  other,
+  highlighted,
+  onPreview,
+  onReply,
+  onEdit,
+  onJump,
+  registerMessage,
+}: {
+  message: Message;
+  mine: boolean;
+  grouped: boolean;
+  read: boolean;
+  me: ChatUser;
+  other: ChatUser;
+  highlighted: boolean;
+  onPreview: (url: string) => void;
+  onReply: (message: Message) => void;
+  onEdit: (message: Message) => void;
+  onJump: (id: string) => void;
+  registerMessage: (id: string, node: HTMLDivElement | null) => void;
+}) {
+  const canEdit = editableMessage(message, me.uid);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const gesture = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    dx: number;
+    mode: 'pending' | 'horizontal' | 'vertical';
+  } | null>(null);
+  const suppressClick = useRef(false);
+  const setNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      registerMessage(message.id, node);
+    },
+    [message.id, registerMessage],
+  );
+  function resetGesture() {
+    const bubble = bubbleRef.current;
+    const shell = shellRef.current;
+    bubble?.classList.remove('dragging');
+    if (bubble) bubble.style.transform = '';
+    shell?.removeAttribute('data-swipe');
+    shell?.removeAttribute('data-armed');
+    gesture.current = null;
+  }
+  function pointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (
+      event.pointerType !== 'touch' ||
+      event.clientX < 24 ||
+      event.clientX > window.innerWidth - 24 ||
+      (event.target as Element).closest('.message-actions, .reply-quote') ||
+      window.getSelection()?.toString()
+    )
+      return;
+    gesture.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      dx: 0,
+      mode: 'pending',
+    };
+  }
+  function pointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const active = gesture.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    const dx = event.clientX - active.x;
+    const dy = event.clientY - active.y;
+    if (active.mode === 'pending' && Math.max(Math.abs(dx), Math.abs(dy)) > 9) {
+      active.mode =
+        Math.abs(dx) > Math.abs(dy) * 1.35 && (dx > 0 || canEdit)
+          ? 'horizontal'
+          : 'vertical';
+      if (active.mode === 'horizontal') {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        bubbleRef.current?.classList.add('dragging');
+      }
+    }
+    if (active.mode !== 'horizontal') return;
+    active.dx = dx;
+    const direction = dx >= 0 ? 'reply' : 'edit';
+    const shell = shellRef.current;
+    if (shell) {
+      shell.dataset.swipe = direction;
+      shell.dataset.armed = String(Math.abs(dx) >= 58);
+    }
+    if (bubbleRef.current)
+      bubbleRef.current.style.transform = `translateX(${Math.sign(dx) * Math.min(68, Math.abs(dx) * 0.58)}px)`;
+  }
+  function pointerEnd(
+    event: ReactPointerEvent<HTMLDivElement>,
+    cancelled = false,
+  ) {
+    const active = gesture.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    const action =
+      !cancelled && active.mode === 'horizontal' && Math.abs(active.dx) >= 58
+        ? active.dx > 0
+          ? 'reply'
+          : 'edit'
+        : undefined;
+    if (active.mode === 'horizontal') {
+      suppressClick.current = true;
+      window.setTimeout(() => {
+        suppressClick.current = false;
+      }, 100);
+    }
+    resetGesture();
+    if (action === 'reply') onReply(message);
+    if (action === 'edit' && canEdit) onEdit(message);
+  }
+  const reply = message.replyTo;
+  const replySender =
+    reply?.senderId === me.uid
+      ? me.displayName
+      : reply?.senderId === other.uid
+        ? other.displayName
+        : 'Unknown user';
+  return (
+    <div
+      ref={setNode}
+      className={`message-line ${mine ? 'mine' : 'theirs'} ${grouped ? 'grouped' : ''} ${highlighted ? 'message-highlight' : ''}`}
+    >
+      {!mine && !grouped && <Avatar user={other} size="sm" />}
+      <div
+        className={`message-swipe-shell ${message.type === 'image' ? 'image-shell' : ''}`}
+        ref={shellRef}
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerEnd}
+        onPointerCancel={(event) => pointerEnd(event, true)}
+        onClickCapture={(event) => {
+          if (suppressClick.current) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        }}
+      >
+        <span className="swipe-indicator" aria-hidden="true">
+          <Reply size={17} className="swipe-reply-icon" />
+          <Pencil size={17} className="swipe-edit-icon" />
+        </span>
+        <div
+          ref={bubbleRef}
+          className={`bubble swipe-bubble ${message.type === 'image' ? 'image-bubble' : ''}`}
+        >
+          <div className="message-actions" aria-label="Message actions">
+            <button
+              type="button"
+              onClick={() => onReply(message)}
+              aria-label="Reply to message"
+              title="Reply"
+            >
+              <Reply size={15} />
+            </button>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => onEdit(message)}
+                aria-label="Edit message"
+                title="Edit"
+              >
+                <Pencil size={15} />
+              </button>
+            )}
+          </div>
+          {reply && (
+            <button
+              type="button"
+              className="reply-quote"
+              onClick={() => onJump(reply.messageId)}
+              aria-label={`Jump to message from ${replySender}`}
+            >
+              <strong>{replySender}</strong>
+              <span>
+                {reply.type === 'image' ? 'Photo' : reply.text || 'Message'}
+              </span>
+            </button>
+          )}
+          {message.type === 'image' && message.imageURL ? (
+            <button
+              className="message-image"
+              onClick={() => onPreview(message.imageURL!)}
+              aria-label="Open shared photo"
+            >
+              <img
+                src={message.imageURL}
+                loading="lazy"
+                decoding="async"
+                alt="Shared attachment"
+              />
+              <span>
+                <ImageIcon size={16} /> Open photo
+              </span>
+            </button>
+          ) : (
+            <p>{message.text}</p>
+          )}
+          <span className="message-meta">
+            <time>{formatMessageTime(message.time)}</time>
+            {message.editedAt && <span className="edited-label">· Edited</span>}
+            {mine && (
+              <span
+                title={read ? 'Read' : 'Sent'}
+                className={read ? 'read' : ''}
+              >
+                <CheckCheck size={15} />
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
     </div>
   );
 });

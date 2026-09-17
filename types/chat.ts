@@ -31,6 +31,14 @@ export interface Message {
   imageURL?: string;
   time: number;
   seenBy: ReadReceipt;
+  replyTo?: ReplyReference;
+  editedAt?: number;
+}
+export interface ReplyReference {
+  messageId: string;
+  senderId: string;
+  text?: string;
+  type?: MessageType;
 }
 export interface Chat {
   id: string;

@@ -8,6 +8,7 @@ Relay is a modern TypeScript rebuild of the original Firebase ChatApp. It uses R
 - Legacy-compatible `users`, `usernames`, `chats`, `messages`, `unread`, `typing`, and `seenBy` data
 - Realtime conversations, presence, last seen, typing, unread counts, and read receipts
 - Text and Cloudinary-hosted image messages with a lightbox
+- Message replies with quoted context and jump-to-original, plus editing your own text messages
 - Responsive desktop/mobile navigation, safe-area support, loading/empty/error states
 - User search, profile editing, profile images, bio, and immutable usernames
 - Opt-in service-worker browser notifications while Relay is running in a background tab or installed PWA window
@@ -28,6 +29,7 @@ Open the local URL printed by the development server. Production checks:
 ```bash
 npm run typecheck
 npm run lint
+npm run test
 npm run build
 ```
 
@@ -93,4 +95,6 @@ userChats/{uid}/{chatId}
 userChatIndexVersion/{uid}
 ```
 
-New messages use `sender`, `text`, `type`, `imageURL`, `time`, and `seenBy`. The deterministic chat ID remains the two user IDs sorted and joined by `_`.
+New messages use `sender`, `text`, `type`, `imageURL`, `time`, and `seenBy`. Replies additionally store a small `replyTo` snapshot (`messageId`, `senderId`, `type`, and up to 160 characters of text). Edited text messages set `editedAt`; original `time`, `sender`, and read receipts stay unchanged. Older messages without these fields continue to render normally. The deterministic chat ID remains the two user IDs sorted and joined by `_`.
+
+On touch screens, swipe a message right to reply, or swipe your own text message left to edit. Reply and Edit buttons are also available on hover or keyboard focus. Deploy the updated `database.rules.json` before using these actions in a live Firebase project; the local emulator test (`npm run test`) checks reply and edit permissions without touching production data.
