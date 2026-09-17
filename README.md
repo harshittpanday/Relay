@@ -79,6 +79,8 @@ node scripts/backfill-public-profiles.mjs --database-url=https://YOUR-PROJECT-de
 
 The script only adds missing public profiles and username mappings. It stops on missing profile names or username collisions so existing data is not silently overwritten. After the backfill, deploy the new rules; otherwise new search reads will be denied by the live rules. Existing private `/users` records are not deleted.
 
+If startup reports `onValue /publicProfiles/{uid}: PERMISSION_DENIED`, the deployed Realtime Database rules do not yet allow the new profile listener. Relay can open from the signed-in user's own legacy `/users/{uid}` record while those rules are pending, but directory search still requires the `publicProfiles` rules to be deployed. The backfill is only needed to make existing accounts that have not logged in since the change searchable; it is not required for a returning user's own profile to load.
+
 ## PWA and offline behavior
 
 The generated service worker caches the application shell and previously loaded Cloudinary images. The current UI remains visible during a network interruption and reports Offline/Reconnecting. Relay does not claim durable offline message delivery: sending is paused while disconnected, and a failed text send leaves the draft intact with a Retry action.

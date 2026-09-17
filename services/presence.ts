@@ -7,38 +7,63 @@ import {
   update,
 } from 'firebase/database';
 import { database } from '@/lib/firebase';
+import { logDatabaseError } from '@/lib/database-error';
 
 export function connectPresence(uid: string) {
   const connectedRef = ref(database, '.info/connected');
-  const rootRef = ref(database);
-  const disconnect = onDisconnect(rootRef);
+  const userPath = `/users/${uid}`;
+  const publicPath = `/publicProfiles/${uid}`;
+  const userRef = ref(database, userPath);
+  const publicRef = ref(database, publicPath);
+  const userDisconnect = onDisconnect(userRef);
+  const publicDisconnect = onDisconnect(publicRef);
   let closed = false;
-  const unsubscribe = onValue(connectedRef, async (snapshot) => {
-    if (snapshot.val() !== true) return;
-    await disconnect.update({
-      [`users/${uid}/online`]: false,
-      [`users/${uid}/lastSeen`]: serverTimestamp(),
-      [`publicProfiles/${uid}/online`]: false,
-      [`publicProfiles/${uid}/lastSeen`]: serverTimestamp(),
+  const mark = (target: typeof userRef, path: string, online: boolean) =>
+    update(target, { online, lastSeen: serverTimestamp() }).catch((error) => {
+      logDatabaseError('update', path, error);
     });
-    if (closed) return;
-    await update(rootRef, {
-      [`users/${uid}/online`]: true,
-      [`users/${uid}/lastSeen`]: serverTimestamp(),
-      [`publicProfiles/${uid}/online`]: true,
-      [`publicProfiles/${uid}/lastSeen`]: serverTimestamp(),
-    });
-  });
+  const unsubscribe = onValue(
+    connectedRef,
+    (snapshot) => {
+      if (snapshot.val() !== true) return;
+      void Promise.allSettled([
+        userDisconnect
+          .update({ online: false, lastSeen: serverTimestamp() })
+          .catch((error) => {
+            logDatabaseError('onDisconnect.update', userPath, error);
+            throw error;
+          }),
+        publicDisconnect
+          .update({ online: false, lastSeen: serverTimestamp() })
+          .catch((error) => {
+            logDatabaseError('onDisconnect.update', publicPath, error);
+            throw error;
+          }),
+      ]).then(() => {
+        if (closed) return;
+        void mark(userRef, userPath, true);
+        void mark(publicRef, publicPath, true);
+      });
+    },
+    (error) => {
+      logDatabaseError('onValue', '/.info/connected', error);
+    },
+  );
   return () => {
     closed = true;
     unsubscribe();
-    void disconnect.cancel();
-    void update(rootRef, {
-      [`users/${uid}/online`]: false,
-      [`users/${uid}/lastSeen`]: serverTimestamp(),
-      [`publicProfiles/${uid}/online`]: false,
-      [`publicProfiles/${uid}/lastSeen`]: serverTimestamp(),
-    });
+    void userDisconnect
+      .cancel()
+      .catch((error) =>
+        logDatabaseError('onDisconnect.cancel', userPath, error),
+      );
+    void publicDisconnect
+      .cancel()
+      .catch((error) =>
+        logDatabaseError('onDisconnect.cancel', publicPath, error),
+      );
+    void mark(userRef, userPath, false);
+    void mark(publicRef, publicPath, false);
   };
 }
 export async function setTyping(chatId: string, uid: string, typing: boolean) {
