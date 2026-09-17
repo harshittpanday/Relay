@@ -81,6 +81,8 @@ The script only adds missing public profiles and username mappings. It stops on 
 
 If startup reports `onValue /publicProfiles/{uid}: PERMISSION_DENIED`, the deployed Realtime Database rules do not yet allow the new profile listener. Relay can open from the signed-in user's own legacy `/users/{uid}` record while those rules are pending, but directory search still requires the `publicProfiles` rules to be deployed. The backfill is only needed to make existing accounts that have not logged in since the change searchable; it is not required for a returning user's own profile to load.
 
+User search makes two bounded reads at `/publicProfiles`: one ordered by `username`, one by `displayNameLower`, each with `startAt`, `endAt`, and `limitToFirst(12)`. The deployed rules must grant `".read": "auth != null"` **at `/publicProfiles` itself**, not just at `/publicProfiles/$uid`, and set `".indexOn": ["username", "displayNameLower"]` at that collection path. A child-only read rule does not authorize a collection query. The indexes improve query efficiency; a `PERMISSION_DENIED` response indicates the read authorization (or the database endpoint) is wrong, not merely a missing index. Check that the rules are deployed to the same Realtime Database instance as `VITE_FIREBASE_DATABASE_URL`.
+
 ## PWA and offline behavior
 
 The generated service worker caches the application shell and previously loaded Cloudinary images. The current UI remains visible during a network interruption and reports Offline/Reconnecting. Relay does not claim durable offline message delivery: sending is paused while disconnected, and a failed text send leaves the draft intact with a Retry action.

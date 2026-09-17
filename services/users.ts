@@ -11,7 +11,7 @@ import {
   update,
 } from 'firebase/database';
 import { database } from '@/lib/firebase';
-import { logDatabaseError } from '@/lib/database-error';
+import { DatabaseOperationError, logDatabaseError } from '@/lib/database-error';
 import type { ChatUser } from '@/types/chat';
 
 const profileRef = (uid: string) => ref(database, `publicProfiles/${uid}`);
@@ -196,8 +196,7 @@ export function subscribeUser(uid: string, callback: (user: ChatUser) => void) {
   };
 }
 export async function searchUsers(term: string, currentUid: string) {
-  const displayTerm = term.trim();
-  const normalizedTerm = displayTerm.toLowerCase();
+  const normalizedTerm = term.trim().toLowerCase();
   if (!normalizedTerm) return [];
   const cacheKey = `${currentUid}:${normalizedTerm}`;
   const cached = searchCache.get(cacheKey);
@@ -205,27 +204,32 @@ export async function searchUsers(term: string, currentUid: string) {
 
   const usersRef = ref(database, 'publicProfiles');
   const upperBound = `${normalizedTerm}\uf8ff`;
-  const searches = [
-    get(
-      query(
-        usersRef,
-        orderByChild('username'),
-        startAt(normalizedTerm),
-        endAt(upperBound),
-        limitToFirst(12),
-      ),
-    ),
-    get(
-      query(
-        usersRef,
-        orderByChild('displayNameLower'),
-        startAt(normalizedTerm),
-        endAt(upperBound),
-        limitToFirst(12),
-      ),
-    ),
-  ];
-  const snapshots = await Promise.all(searches);
+  const searchField = async (field: 'username' | 'displayNameLower') => {
+    const searchQuery = query(
+      usersRef,
+      orderByChild(field),
+      startAt(normalizedTerm),
+      endAt(upperBound),
+      limitToFirst(12),
+    );
+    try {
+      return await get(searchQuery);
+    } catch (cause) {
+      const operation = `get(query orderByChild(${field}), startAt(${JSON.stringify(normalizedTerm)}), endAt(${JSON.stringify(upperBound)}), limitToFirst(12))`;
+      if (import.meta.env.DEV)
+        console.error('[Relay search] Firebase query failed', {
+          path: '/publicProfiles',
+          operation,
+          databaseURL: database.app.options.databaseURL,
+          cause,
+        });
+      throw new DatabaseOperationError(operation, '/publicProfiles', cause);
+    }
+  };
+  const snapshots = await Promise.all([
+    searchField('username'),
+    searchField('displayNameLower'),
+  ]);
   const matches = new Map<string, ChatUser>();
   snapshots.forEach((snapshot) =>
     snapshot.forEach((child) => {
