@@ -35,6 +35,7 @@ import { useNetwork } from '@/hooks/use-network';
 import { usePwa } from '@/hooks/use-pwa';
 import { firebaseConfigured } from '@/lib/firebase';
 import { emojiSize } from '@/lib/emoji';
+import { placeMessageToolbar } from '@/lib/message-toolbar';
 import { sortConversations } from '@/lib/conversation-sort';
 import {
   formatConversationTime,
@@ -1230,8 +1231,10 @@ const MessageBubble = memo(function MessageBubble({
   const [reactionOpen, setReactionOpen] = useState(false);
   const [longPressActions, setLongPressActions] = useState(false);
   const [pickerPosition, setPickerPosition] = useState({ top: 0, left: 0 });
+  const [toolbarActive, setToolbarActive] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const bubbleRef = useRef<HTMLDivElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
   const pickerRef = useRef<HTMLFieldSetElement>(null);
   const reactionTrigger = useRef<HTMLButtonElement>(null);
   const longPressTimer = useRef<number | null>(null);
@@ -1246,6 +1249,36 @@ const MessageBubble = memo(function MessageBubble({
     mode: 'pending' | 'horizontal' | 'vertical';
   } | null>(null);
   const suppressClick = useRef(false);
+  const positionToolbar = useCallback(() => {
+    const bubble = bubbleRef.current;
+    const shell = shellRef.current;
+    const actions = actionsRef.current;
+    const viewport = bubble?.closest('.message-scroll');
+    if (!bubble || !shell || !actions || !viewport) return;
+    const position = placeMessageToolbar(
+      bubble.getBoundingClientRect(),
+      shell.getBoundingClientRect(),
+      viewport.getBoundingClientRect(),
+      actions.offsetWidth,
+      actions.offsetHeight,
+    );
+    actions.style.right = 'auto';
+    actions.style.left = `${position.left}px`;
+    actions.style.top = `${position.top}px`;
+  }, []);
+  useLayoutEffect(() => {
+    if (!toolbarActive) return;
+    const viewport = bubbleRef.current?.closest('.message-scroll');
+    positionToolbar();
+    viewport?.addEventListener('scroll', positionToolbar, { passive: true });
+    window.addEventListener('resize', positionToolbar);
+    window.visualViewport?.addEventListener('resize', positionToolbar);
+    return () => {
+      viewport?.removeEventListener('scroll', positionToolbar);
+      window.removeEventListener('resize', positionToolbar);
+      window.visualViewport?.removeEventListener('resize', positionToolbar);
+    };
+  }, [toolbarActive, positionToolbar]);
   useLayoutEffect(() => {
     if (!reactionOpen) return;
     const position = () => {
@@ -1438,6 +1471,21 @@ const MessageBubble = memo(function MessageBubble({
       <div
         className={`message-swipe-shell ${message.type === 'image' ? 'image-shell' : ''}`}
         ref={shellRef}
+        onMouseEnter={() => setToolbarActive(true)}
+        onMouseLeave={() => {
+          if (!shellRef.current?.contains(document.activeElement))
+            setToolbarActive(false);
+        }}
+        onFocusCapture={() => setToolbarActive(true)}
+        onBlurCapture={() => {
+          requestAnimationFrame(() => {
+            if (
+              !shellRef.current?.contains(document.activeElement) &&
+              !shellRef.current?.matches(':hover')
+            )
+              setToolbarActive(false);
+          });
+        }}
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerEnd}
@@ -1461,7 +1509,11 @@ const MessageBubble = memo(function MessageBubble({
           ref={bubbleRef}
           className={`bubble swipe-bubble ${message.type === 'image' ? 'image-bubble' : ''} ${largeEmoji ? `emoji-message emoji-${largeEmoji}` : ''}`}
         >
-          <div className="message-actions" aria-label="Message actions">
+          <div
+            ref={actionsRef}
+            className="message-actions"
+            aria-label="Message actions"
+          >
             <button
               type="button"
               onClick={() => onReply(message)}
