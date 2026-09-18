@@ -11,6 +11,7 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   Bell,
@@ -20,7 +21,9 @@ import {
   MoreHorizontal,
   Paperclip,
   Pencil,
+  Pin,
   Reply,
+  SmilePlus,
   Search,
   Send,
   Settings,
@@ -31,6 +34,8 @@ import { useAuth } from '@/hooks/use-auth';
 import { useNetwork } from '@/hooks/use-network';
 import { usePwa } from '@/hooks/use-pwa';
 import { firebaseConfigured } from '@/lib/firebase';
+import { emojiSize } from '@/lib/emoji';
+import { sortConversations } from '@/lib/conversation-sort';
 import {
   formatConversationTime,
   formatDay,
@@ -45,12 +50,17 @@ import {
   editMessage,
   markChatRead,
   MAX_MESSAGE_LENGTH,
+  REACTIONS,
   replyReference,
   sendMessage,
+  setChatPinned,
   subscribeConversations,
   subscribeMessages,
+  subscribePins,
   subscribeTyping,
+  toggleReaction,
 } from '@/services/chats';
+import type { ReactionEmoji } from '@/services/chats';
 import { searchUsers, subscribeUser } from '@/services/users';
 import { uploadImage } from '@/services/uploads';
 import { getNotificationState, notifyIncoming } from '@/services/notifications';
@@ -65,6 +75,7 @@ type ComposerMode =
   | { kind: 'normal' }
   | { kind: 'reply'; target: Message }
   | { kind: 'edit'; target: Message; previousDraft: string };
+const EMPTY_PINS = new Set<string>();
 
 const editableMessage = (message: Message, uid: string) =>
   message.sender === uid &&
@@ -91,6 +102,12 @@ function ChatAppInner() {
   const toast = useToast();
   const [me, setMe] = useState<ChatUser | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [pinState, setPinState] = useState<{
+    uid: string;
+    ids: Set<string>;
+  } | null>(null);
+  const pinnedIds =
+    pinState && pinState.uid === authUser?.uid ? pinState.ids : EMPTY_PINS;
   const [activeId, setActiveId] = useState<string>();
   const [activeFallback, setActiveFallback] = useState<Conversation | null>(
     null,
@@ -109,14 +126,43 @@ function ChatAppInner() {
   const activeIdRef = useRef(activeId);
   const conversationsRef = useRef<Conversation[]>([]);
 
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    let frame = 0;
+    let previous = 0;
+    const sync = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const height = Math.round(
+          Math.min(window.innerHeight, viewport.height + viewport.offsetTop),
+        );
+        if (Math.abs(height - previous) < 2) return;
+        previous = height;
+        document.documentElement.style.setProperty(
+          '--relay-viewport-height',
+          `${height}px`,
+        );
+      });
+    };
+    sync();
+    viewport.addEventListener('resize', sync);
+    viewport.addEventListener('scroll', sync);
+    window.addEventListener('resize', sync);
+    window.addEventListener('orientationchange', sync);
+    return () => {
+      cancelAnimationFrame(frame);
+      viewport.removeEventListener('resize', sync);
+      viewport.removeEventListener('scroll', sync);
+      window.removeEventListener('resize', sync);
+      window.removeEventListener('orientationchange', sync);
+      document.documentElement.style.removeProperty('--relay-viewport-height');
+    };
+  }, []);
+
   const sortedConversations = useMemo(
-    () =>
-      [...conversations].sort(
-        (a, b) =>
-          (b.updatedAt || b.latestMessage?.time || 0) -
-          (a.updatedAt || a.latestMessage?.time || 0),
-      ),
-    [conversations],
+    () => sortConversations(conversations, pinnedIds),
+    [conversations, pinnedIds],
   );
   const baseActive = useMemo(
     () =>
@@ -177,6 +223,24 @@ function ChatAppInner() {
           authUser.uid,
           relevantChatVisible,
         );
+      },
+    );
+  }, [authUser, toast]);
+  useEffect(() => {
+    if (!authUser) {
+      setPinState(null);
+      return;
+    }
+    return subscribePins(
+      authUser.uid,
+      (ids) => setPinState({ uid: authUser.uid, ids }),
+      (error) => {
+        console.warn(
+          `[Relay pins] subscribe /userPins/${authUser.uid} failed`,
+          error,
+        );
+        if (!/permission.denied/i.test(error.message))
+          toast(friendlyError(error), 'error');
       },
     );
   }, [authUser, toast]);
@@ -282,6 +346,17 @@ function ChatAppInner() {
     history.pushState({}, '', location.pathname);
   }, []);
   const openSettings = useCallback(() => setProfileOpen(true), []);
+  const togglePin = useCallback(
+    async (chatId: string) => {
+      if (!authUser) return;
+      try {
+        await setChatPinned(authUser.uid, chatId, !pinnedIds.has(chatId));
+      } catch (error) {
+        toast(friendlyError(error), 'error');
+      }
+    },
+    [authUser, pinnedIds, toast],
+  );
   const startConversation = useCallback(
     async (other: ChatUser) => {
       if (!me) return;
@@ -313,6 +388,7 @@ function ChatAppInner() {
       <Sidebar
         me={me}
         conversations={sortedConversations}
+        pinnedIds={pinnedIds}
         activeId={active?.id}
         onSelect={selectConversation}
         onSettings={openSettings}
@@ -327,6 +403,8 @@ function ChatAppInner() {
             messages={messages}
             loading={messagesLoading}
             typing={otherTyping}
+            pinned={pinnedIds.has(active.id)}
+            onTogglePin={() => void togglePin(active.id)}
             network={network}
             onBack={closeConversation}
           />
@@ -370,6 +448,7 @@ function ChatAppInner() {
 const Sidebar = memo(function Sidebar({
   me,
   conversations,
+  pinnedIds,
   activeId,
   onSelect,
   onSettings,
@@ -377,6 +456,7 @@ const Sidebar = memo(function Sidebar({
 }: {
   me: ChatUser;
   conversations: Conversation[];
+  pinnedIds: Set<string>;
   activeId?: string;
   onSelect: (conversation: Conversation) => void;
   onSettings: () => void;
@@ -462,6 +542,7 @@ const Sidebar = memo(function Sidebar({
               key={conversation.id}
               conversation={conversation}
               meUid={me.uid}
+              pinned={pinnedIds.has(conversation.id)}
               active={activeId === conversation.id}
               onSelect={onSelect}
             />
@@ -543,11 +624,13 @@ const SearchResults = memo(function SearchResults({
 const ConversationRow = memo(function ConversationRow({
   conversation,
   meUid,
+  pinned,
   active,
   onSelect,
 }: {
   conversation: Conversation;
   meUid: string;
+  pinned: boolean;
   active: boolean;
   onSelect: (conversation: Conversation) => void;
 }) {
@@ -567,6 +650,13 @@ const ConversationRow = memo(function ConversationRow({
       <span className="conversation-copy">
         <span>
           <strong>{user.displayName}</strong>
+          {pinned && (
+            <Pin
+              className="pinned-icon"
+              size={13}
+              aria-label="Pinned conversation"
+            />
+          )}
           <time>
             {formatConversationTime(conversation.updatedAt || latest?.time)}
           </time>
@@ -593,6 +683,8 @@ function ConversationView({
   messages,
   loading,
   typing,
+  pinned,
+  onTogglePin,
   network,
   onBack,
 }: {
@@ -601,15 +693,13 @@ function ConversationView({
   messages: Message[];
   loading: boolean;
   typing: boolean;
+  pinned: boolean;
+  onTogglePin: () => void;
   network: string;
   onBack: () => void;
 }) {
   const other = conversation.otherUser;
-  const status = typing
-    ? 'Typing…'
-    : other.online
-      ? 'Online'
-      : formatPresence(other.lastSeen);
+  const status = other.online ? 'Online' : formatPresence(other.lastSeen);
   const toast = useToast();
   const [draft, setDraft] = useState('');
   const [mode, setMode] = useState<ComposerMode>({ kind: 'normal' });
@@ -622,6 +712,8 @@ function ConversationView({
   const [uploading, setUploading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -631,6 +723,22 @@ function ConversationView({
   const highlightTimer = useRef<number | null>(null);
   const typingTimer = useRef<number | null>(null);
   const typingActive = useRef(false);
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!optionsRef.current?.contains(event.target as Node))
+        setOptionsOpen(false);
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setOptionsOpen(false);
+    };
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [optionsOpen]);
   useLayoutEffect(() => {
     if (!stickToBottom.current) return;
     const frame = requestAnimationFrame(() => {
@@ -639,7 +747,24 @@ function ConversationView({
       else endRef.current?.scrollIntoView({ block: 'end' });
     });
     return () => cancelAnimationFrame(frame);
-  }, [messages.length]);
+  }, [messages.length, typing]);
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottom.current) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        scroller.scrollTop = scroller.scrollHeight;
+      });
+    });
+    observer.observe(scroller);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
   useEffect(
     () => () => {
       if (typingTimer.current) clearTimeout(typingTimer.current);
@@ -728,6 +853,16 @@ function ConversationView({
     },
     [],
   );
+  const reactToMessage = useCallback(
+    async (message: Message, emoji: ReactionEmoji) => {
+      try {
+        await toggleReaction(conversation.id, message.id, me.uid, emoji);
+      } catch (error) {
+        toast(friendlyError(error), 'error');
+      }
+    },
+    [conversation.id, me.uid, toast],
+  );
   async function sendText() {
     const text = draft.trim();
     if (!text || sending || network !== 'online') return;
@@ -811,14 +946,32 @@ function ConversationView({
         <Avatar user={other} size="sm" online={other.online} />
         <div>
           <strong>{other.displayName}</strong>
-          <span className={typing ? 'typing' : ''}>{status}</span>
+          <span>{status}</span>
         </div>
-        <button
-          className="icon-button header-action"
-          aria-label="Conversation options"
-        >
-          <MoreHorizontal />
-        </button>
+        <div className="header-options" ref={optionsRef}>
+          <button
+            className="icon-button header-action"
+            aria-label="Conversation options"
+            aria-expanded={optionsOpen}
+            onClick={() => setOptionsOpen((open) => !open)}
+          >
+            <MoreHorizontal />
+          </button>
+          {optionsOpen && (
+            <div className="header-menu">
+              <button
+                type="button"
+                aria-label={pinned ? 'Unpin conversation' : 'Pin conversation'}
+                onClick={() => {
+                  onTogglePin();
+                  setOptionsOpen(false);
+                }}
+              >
+                <Pin size={15} /> {pinned ? 'Unpin chat' : 'Pin chat'}
+              </button>
+            </div>
+          )}
+        </div>
       </header>
       <div
         ref={scrollRef}
@@ -847,10 +1000,24 @@ function ConversationView({
             onPreview={setPreview}
             onReply={startReply}
             onEdit={startEdit}
+            onReact={reactToMessage}
             onJump={jumpToOriginal}
             registerMessage={registerMessage}
             highlightedId={highlightedId}
           />
+        )}
+        {typing && !loading && (
+          <output
+            className="typing-line"
+            aria-label={`${other.displayName} is typing`}
+          >
+            <Avatar user={other} size="sm" />
+            <div className="typing-bubble" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+          </output>
         )}
         <div ref={endRef} />
       </div>
@@ -961,6 +1128,7 @@ const MessageList = memo(function MessageList({
   onPreview,
   onReply,
   onEdit,
+  onReact,
   onJump,
   registerMessage,
   highlightedId,
@@ -972,6 +1140,7 @@ const MessageList = memo(function MessageList({
   onPreview: (url: string) => void;
   onReply: (message: Message) => void;
   onEdit: (message: Message) => void;
+  onReact: (message: Message, emoji: ReactionEmoji) => Promise<void>;
   onJump: (id: string) => void;
   registerMessage: (id: string, node: HTMLDivElement | null) => void;
   highlightedId?: string;
@@ -1013,6 +1182,7 @@ const MessageList = memo(function MessageList({
               onPreview={onPreview}
               onReply={onReply}
               onEdit={onEdit}
+              onReact={onReact}
               onJump={onJump}
               registerMessage={registerMessage}
             />
@@ -1034,6 +1204,7 @@ const MessageBubble = memo(function MessageBubble({
   onPreview,
   onReply,
   onEdit,
+  onReact,
   onJump,
   registerMessage,
 }: {
@@ -1047,12 +1218,26 @@ const MessageBubble = memo(function MessageBubble({
   onPreview: (url: string) => void;
   onReply: (message: Message) => void;
   onEdit: (message: Message) => void;
+  onReact: (message: Message, emoji: ReactionEmoji) => Promise<void>;
   onJump: (id: string) => void;
   registerMessage: (id: string, node: HTMLDivElement | null) => void;
 }) {
   const canEdit = editableMessage(message, me.uid);
+  const largeEmoji = useMemo(
+    () => (message.type === 'text' ? emojiSize(message.text) : null),
+    [message.text, message.type],
+  );
+  const [reactionOpen, setReactionOpen] = useState(false);
+  const [longPressActions, setLongPressActions] = useState(false);
+  const [pickerPosition, setPickerPosition] = useState({ top: 0, left: 0 });
   const shellRef = useRef<HTMLDivElement>(null);
   const bubbleRef = useRef<HTMLDivElement>(null);
+  const pickerRef = useRef<HTMLFieldSetElement>(null);
+  const reactionTrigger = useRef<HTMLButtonElement>(null);
+  const longPressTimer = useRef<number | null>(null);
+  const longPressed = useRef(false);
+  const suppressContextMenu = useRef(false);
+  const reactionBusy = useRef(false);
   const gesture = useRef<{
     pointerId: number;
     x: number;
@@ -1061,6 +1246,76 @@ const MessageBubble = memo(function MessageBubble({
     mode: 'pending' | 'horizontal' | 'vertical';
   } | null>(null);
   const suppressClick = useRef(false);
+  useLayoutEffect(() => {
+    if (!reactionOpen) return;
+    const position = () => {
+      const rect = shellRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.min(292, window.innerWidth - 16);
+      const pickerHeight = longPressActions ? 96 : 56;
+      setPickerPosition({
+        top:
+          rect.top >= pickerHeight + 6
+            ? rect.top - pickerHeight - 2
+            : Math.min(window.innerHeight - pickerHeight - 8, rect.bottom + 8),
+        left: Math.max(
+          8,
+          Math.min(
+            mine ? rect.right - width : rect.left,
+            window.innerWidth - width - 8,
+          ),
+        ),
+      });
+    };
+    const closeOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        !pickerRef.current?.contains(target) &&
+        !shellRef.current?.contains(target)
+      )
+        setReactionOpen(false);
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setReactionOpen(false);
+        reactionTrigger.current?.focus();
+      }
+    };
+    position();
+    requestAnimationFrame(() =>
+      pickerRef.current?.querySelector('button')?.focus(),
+    );
+    window.addEventListener('resize', position);
+    document.addEventListener('scroll', position, true);
+    document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('resize', position);
+      document.removeEventListener('scroll', position, true);
+      document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [reactionOpen, mine, longPressActions]);
+  useEffect(
+    () => () => {
+      if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    },
+    [],
+  );
+  function clearLongPress() {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+  }
+  async function react(emoji: ReactionEmoji) {
+    if (reactionBusy.current) return;
+    reactionBusy.current = true;
+    setReactionOpen(false);
+    try {
+      await onReact(message, emoji);
+    } finally {
+      reactionBusy.current = false;
+    }
+  }
   const setNode = useCallback(
     (node: HTMLDivElement | null) => {
       registerMessage(message.id, node);
@@ -1081,7 +1336,9 @@ const MessageBubble = memo(function MessageBubble({
       event.pointerType !== 'touch' ||
       event.clientX < 24 ||
       event.clientX > window.innerWidth - 24 ||
-      (event.target as Element).closest('.message-actions, .reply-quote') ||
+      (event.target as Element).closest(
+        '.message-actions, .reply-quote, .reaction-chips',
+      ) ||
       window.getSelection()?.toString()
     )
       return;
@@ -1092,12 +1349,24 @@ const MessageBubble = memo(function MessageBubble({
       dx: 0,
       mode: 'pending',
     };
+    longPressed.current = false;
+    clearLongPress();
+    longPressTimer.current = window.setTimeout(() => {
+      if (gesture.current?.mode !== 'pending') return;
+      longPressed.current = true;
+      suppressContextMenu.current = true;
+      gesture.current = null;
+      suppressClick.current = true;
+      setLongPressActions(true);
+      setReactionOpen(true);
+    }, 480);
   }
   function pointerMove(event: ReactPointerEvent<HTMLDivElement>) {
     const active = gesture.current;
     if (!active || active.pointerId !== event.pointerId) return;
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) > 9) clearLongPress();
     if (active.mode === 'pending' && Math.max(Math.abs(dx), Math.abs(dy)) > 9) {
       active.mode =
         Math.abs(dx) > Math.abs(dy) * 1.35 && (dx > 0 || canEdit)
@@ -1123,6 +1392,15 @@ const MessageBubble = memo(function MessageBubble({
     event: ReactPointerEvent<HTMLDivElement>,
     cancelled = false,
   ) {
+    clearLongPress();
+    if (longPressed.current) {
+      longPressed.current = false;
+      window.setTimeout(() => {
+        suppressClick.current = false;
+        suppressContextMenu.current = false;
+      }, 700);
+      return;
+    }
     const active = gesture.current;
     if (!active || active.pointerId !== event.pointerId) return;
     const action =
@@ -1142,6 +1420,9 @@ const MessageBubble = memo(function MessageBubble({
     if (action === 'edit' && canEdit) onEdit(message);
   }
   const reply = message.replyTo;
+  const reactionChips = REACTIONS.filter(
+    ({ emoji }) => Object.keys(message.reactions?.[emoji] || {}).length > 0,
+  );
   const replySender =
     reply?.senderId === me.uid
       ? me.displayName
@@ -1161,6 +1442,10 @@ const MessageBubble = memo(function MessageBubble({
         onPointerMove={pointerMove}
         onPointerUp={pointerEnd}
         onPointerCancel={(event) => pointerEnd(event, true)}
+        onContextMenu={(event) => {
+          if (suppressContextMenu.current || reactionOpen)
+            event.preventDefault();
+        }}
         onClickCapture={(event) => {
           if (suppressClick.current) {
             event.preventDefault();
@@ -1174,7 +1459,7 @@ const MessageBubble = memo(function MessageBubble({
         </span>
         <div
           ref={bubbleRef}
-          className={`bubble swipe-bubble ${message.type === 'image' ? 'image-bubble' : ''}`}
+          className={`bubble swipe-bubble ${message.type === 'image' ? 'image-bubble' : ''} ${largeEmoji ? `emoji-message emoji-${largeEmoji}` : ''}`}
         >
           <div className="message-actions" aria-label="Message actions">
             <button
@@ -1195,6 +1480,19 @@ const MessageBubble = memo(function MessageBubble({
                 <Pencil size={15} />
               </button>
             )}
+            <button
+              type="button"
+              ref={reactionTrigger}
+              onClick={() => {
+                setLongPressActions(false);
+                setReactionOpen((open) => !open);
+              }}
+              aria-label="React to message"
+              aria-expanded={reactionOpen}
+              title="React"
+            >
+              <SmilePlus size={15} />
+            </button>
           </div>
           {reply && (
             <button
@@ -1241,7 +1539,75 @@ const MessageBubble = memo(function MessageBubble({
             )}
           </span>
         </div>
+        {reactionChips.length > 0 && (
+          <div className="reaction-chips" aria-label="Message reactions">
+            {reactionChips.map(({ emoji, label }) => {
+              const users = message.reactions?.[emoji] || {};
+              const count = Object.keys(users).length;
+              return (
+                <button
+                  type="button"
+                  key={emoji}
+                  className={users[me.uid] ? 'selected' : ''}
+                  aria-label={`${label}, ${count} ${count === 1 ? 'reaction' : 'reactions'}; ${users[me.uid] ? 'remove yours' : 'add yours'}`}
+                  aria-pressed={Boolean(users[me.uid])}
+                  onClick={() => void react(emoji)}
+                >
+                  <span>{emoji}</span>
+                  {count > 1 && <small>{count}</small>}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
+      {reactionOpen &&
+        createPortal(
+          <fieldset
+            ref={pickerRef}
+            className="reaction-picker"
+            style={{ top: pickerPosition.top, left: pickerPosition.left }}
+            aria-label="Choose a reaction"
+          >
+            <div className="reaction-picker-choices">
+              {REACTIONS.map(({ emoji, label }) => (
+                <button
+                  type="button"
+                  key={emoji}
+                  aria-label={`React with ${label}`}
+                  onClick={() => void react(emoji)}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+            {longPressActions && (
+              <div className="reaction-picker-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReactionOpen(false);
+                    onReply(message);
+                  }}
+                >
+                  <Reply size={15} /> Reply
+                </button>
+                {canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReactionOpen(false);
+                      onEdit(message);
+                    }}
+                  >
+                    <Pencil size={15} /> Edit
+                  </button>
+                )}
+              </div>
+            )}
+          </fieldset>,
+          document.body,
+        )}
     </div>
   );
 });

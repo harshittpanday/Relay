@@ -16,10 +16,40 @@ import {
 import { database } from '@/lib/firebase';
 import { logDatabaseError } from '@/lib/database-error';
 import { subscribeUser } from './users';
-import type { Chat, Conversation, Message, ReplyReference } from '@/types/chat';
+import type {
+  Chat,
+  Conversation,
+  Message,
+  MessageReactions,
+  ReplyReference,
+} from '@/types/chat';
 
 export const MAX_MESSAGE_LENGTH = 4000;
 const REPLY_PREVIEW_LENGTH = 160;
+export const REACTIONS = [
+  { emoji: '❤️', label: 'red heart' },
+  { emoji: '💖', label: 'sparkling pink heart' },
+  { emoji: '💗', label: 'growing pink heart' },
+  { emoji: '😭', label: 'crying face' },
+  { emoji: '🙂', label: 'slight smile' },
+  { emoji: '😂', label: 'laughing face' },
+] as const;
+export type ReactionEmoji = (typeof REACTIONS)[number]['emoji'];
+
+const normalizeReactions = (value: unknown): MessageReactions | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const result: MessageReactions = {};
+  for (const { emoji } of REACTIONS) {
+    const users = raw[emoji];
+    if (!users || typeof users !== 'object') continue;
+    const selected = Object.fromEntries(
+      Object.entries(users).filter(([, present]) => present === true),
+    ) as Record<string, true>;
+    if (Object.keys(selected).length) result[emoji] = selected;
+  }
+  return Object.keys(result).length ? result : undefined;
+};
 
 const normalizeReply = (value: unknown): ReplyReference | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -63,7 +93,58 @@ const normalizeMessage = (id: string, raw: Partial<Message>): Message => ({
     typeof raw.editedAt === 'number' && Number.isFinite(raw.editedAt)
       ? raw.editedAt
       : undefined,
+  reactions: normalizeReactions(raw.reactions),
 });
+
+export function subscribePins(
+  uid: string,
+  callback: (ids: Set<string>) => void,
+  onError: (error: Error) => void,
+) {
+  return onValue(
+    ref(database, `userPins/${uid}`),
+    (snapshot) => {
+      const value = snapshot.val() as Record<string, unknown> | null;
+      callback(
+        new Set(Object.keys(value || {}).filter((id) => value?.[id] === true)),
+      );
+    },
+    onError,
+  );
+}
+
+export async function setChatPinned(
+  uid: string,
+  chatId: string,
+  pinned: boolean,
+) {
+  const path = `/userPins/${uid}/${chatId}`;
+  await set(ref(database, path), pinned ? true : null).catch(
+    (error: unknown) => {
+      throw logDatabaseError('pin set', path, error);
+    },
+  );
+}
+
+export async function toggleReaction(
+  chatId: string,
+  messageId: string,
+  uid: string,
+  emoji: ReactionEmoji,
+) {
+  if (!REACTIONS.some((reaction) => reaction.emoji === emoji))
+    throw new Error('Unsupported reaction.');
+  const path = `/chats/${chatId}/messages/${messageId}/reactions/${emoji}/${uid}`;
+  await runTransaction(
+    ref(database, path),
+    (current) => (current === true ? null : true),
+    {
+      applyLocally: false,
+    },
+  ).catch((error: unknown) => {
+    throw logDatabaseError('reaction transaction', path, error);
+  });
+}
 
 export function subscribeConversations(
   uid: string,

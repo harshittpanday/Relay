@@ -23,6 +23,7 @@ export interface TypingState {
 export interface ReadReceipt {
   [uid: string]: boolean;
 }
+export type MessageReactions = Record<string, Record<string, true>>;
 export interface Message {
   id: string;
   sender: string;
@@ -33,6 +34,7 @@ export interface Message {
   seenBy: ReadReceipt;
   replyTo?: ReplyReference;
   editedAt?: number;
+  reactions?: MessageReactions;
 }
 export interface ReplyReference {
   messageId: string;

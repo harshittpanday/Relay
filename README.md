@@ -9,6 +9,7 @@ Relay is a modern TypeScript rebuild of the original Firebase ChatApp. It uses R
 - Realtime conversations, presence, last seen, typing, unread counts, and read receipts
 - Text and Cloudinary-hosted image messages with a lightbox
 - Message replies with quoted context and jump-to-original, plus editing your own text messages
+- Six per-user message reactions, personal pinned chats, large emoji-only messages, and animated typing dots
 - Responsive desktop/mobile navigation, safe-area support, loading/empty/error states
 - User search, profile editing, profile images, bio, and immutable usernames
 - Opt-in service-worker browser notifications while Relay is running in a background tab or installed PWA window
@@ -66,6 +67,8 @@ Optional image-upload variables:
 4. Add the development and production hosts to Authentication → Authorized domains.
 5. Existing messages remain compatible when `type`, `text`, or `seenBy` fields are missing.
 
+Deploy the current rules before using reactions or pinned chats: they add participant-only reaction writes under each message and owner-only `userPins/{uid}/{chatId}` preferences. Existing messages and chats need no backfill.
+
 The app extends existing records safely with `lastSeen`, `updatedAt`, and `lastMessage`. Usernames remain immutable in the UI so the existing `usernames/{username}` mapping cannot drift.
 
 ## PWA and offline behavior
@@ -89,10 +92,12 @@ users/{uid}
 usernames/{username}
 chats/{chatId}/participants/{uid}
 chats/{chatId}/messages/{messageId}
+chats/{chatId}/messages/{messageId}/reactions/{emoji}/{uid}
 chats/{chatId}/unread/{uid}
 chats/{chatId}/typing/{uid}
 userChats/{uid}/{chatId}
 userChatIndexVersion/{uid}
+userPins/{uid}/{chatId}
 ```
 
 New messages use `sender`, `text`, `type`, `imageURL`, `time`, and `seenBy`. Replies additionally store a small `replyTo` snapshot (`messageId`, `senderId`, `type`, and up to 160 characters of text). Edited text messages set `editedAt`; original `time`, `sender`, and read receipts stay unchanged. Older messages without these fields continue to render normally. The deterministic chat ID remains the two user IDs sorted and joined by `_`.

@@ -65,6 +65,16 @@ test('chat participants can reply and edit only their own text', async () => {
         seenBy: { outsider: true },
       }),
     );
+    await assertFails(
+      alice.ref(`${path}/messages/forgedReaction`).set({
+        sender: 'alice',
+        type: 'text',
+        text: 'No forged reactions',
+        time: 2,
+        seenBy: { alice: true },
+        reactions: { '❤️': { bob: true } },
+      }),
+    );
     await assertSucceeds(
       alice.ref(`${path}/messages/text1`).set({
         sender: 'alice',
@@ -159,6 +169,52 @@ test('chat participants can reply and edit only their own text', async () => {
       alice.ref(`${path}/messages/legacy/text`).set('Updated old message'),
     );
     await assertFails(bob.ref(`${path}/messages/legacy/text`).set('Not yours'));
+    const heart = `${path}/messages/text1/reactions/❤️`;
+    await assertSucceeds(alice.ref(`${heart}/alice`).set(true));
+    await assertSucceeds(bob.ref(`${heart}/bob`).set(true));
+    assert.deepEqual((await alice.ref(heart).get()).val(), {
+      alice: true,
+      bob: true,
+    });
+    await assertSucceeds(
+      alice.ref(`${path}/messages/text1/reactions/😂/alice`).set(true),
+    );
+    await assertSucceeds(alice.ref(`${heart}/alice`).remove());
+    assert.equal((await bob.ref(`${heart}/bob`).get()).val(), true);
+    await assertSucceeds(
+      alice.ref(`${path}/messages/photo1/reactions/🙂/alice`).set(true),
+    );
+    await assertSucceeds(
+      bob.ref(`${path}/messages/reply1/reactions/💖/bob`).set(true),
+    );
+    await assertSucceeds(
+      bob.ref(`${path}/messages/legacy/reactions/😭/bob`).set(true),
+    );
+    await assertFails(outsider.ref(`${heart}/outsider`).set(true));
+    await assertFails(guest.ref(`${heart}/guest`).set(true));
+    await assertFails(alice.ref(`${heart}/bob`).remove());
+    await assertFails(bob.ref(`${heart}/alice`).set(true));
+    await assertFails(
+      alice.ref(`${path}/messages/text1/reactions/👎/alice`).set(true),
+    );
+    await assertFails(
+      alice.ref(`${path}/messages/missing/reactions/❤️/alice`).set(true),
+    );
+    await assertFails(alice.ref(`${path}/messages/text1/sender`).set('bob'));
+
+    await assertFails(guest.ref('userPins/alice').get());
+    await assertSucceeds(alice.ref(`userPins/alice/${chat}`).set(true));
+    assert.equal((await alice.ref(`userPins/alice/${chat}`).get()).val(), true);
+    await assertFails(bob.ref(`userPins/alice/${chat}`).get());
+    assert.equal((await bob.ref(`userPins/bob/${chat}`).get()).exists(), false);
+    await assertFails(bob.ref(`userPins/alice/${chat}`).set(true));
+    await assertFails(outsider.ref(`userPins/outsider/${chat}`).set(true));
+    await assertSucceeds(bob.ref(`userPins/bob/${chat}`).set(true));
+    await assertSucceeds(alice.ref(`userPins/alice/${chat}`).remove());
+    assert.equal(
+      (await alice.ref(`userPins/alice/${chat}`).get()).exists(),
+      false,
+    );
   } finally {
     await environment.cleanup();
   }

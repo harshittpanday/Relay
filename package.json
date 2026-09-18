@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
-    "test": "firebase emulators:exec --only database --project demo-relay --config firebase.json \"node --test tests/database-rules.test.mjs\"",
+    "test": "node --experimental-strip-types --test tests/emoji.test.mjs tests/conversation-sort.test.mjs && firebase emulators:exec --only database --project demo-relay --config firebase.json \"node --test tests/database-rules.test.mjs\"",
     "format": "oxfmt"
   },
   "dependencies": {
