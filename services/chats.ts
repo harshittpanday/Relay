@@ -32,7 +32,7 @@ export const REACTIONS = [
   { emoji: '💗', label: 'growing pink heart' },
   { emoji: '😭', label: 'crying face' },
   { emoji: '🙂', label: 'slight smile' },
-  { emoji: '😂', label: 'laughing face' },
+  { emoji: '💋', label: 'kiss' },
 ] as const;
 export type ReactionEmoji = (typeof REACTIONS)[number]['emoji'];
 
@@ -217,9 +217,9 @@ export function subscribeConversations(
             const raw = messageSnapshot.val() as Partial<Message> | null;
             const latest = raw
               ? normalizeMessage(
-                  raw.id || `${raw.sender || 'unknown'}-${raw.time || 0}`,
-                  raw,
-                )
+                raw.id || `${raw.sender || 'unknown'}-${raw.time || 0}`,
+                raw,
+              )
               : items.get(id)?.latestMessage;
             const nextKey = latest?.id || '';
             const current = items.get(id);
@@ -344,7 +344,7 @@ const getLatestMessage = (chat?: Chat) => {
   if (chat?.lastMessage)
     return normalizeMessage(
       chat.lastMessage.id ||
-        `${chat.lastMessage.sender || 'unknown'}-${chat.lastMessage.time || 0}`,
+      `${chat.lastMessage.sender || 'unknown'}-${chat.lastMessage.time || 0}`,
       chat.lastMessage,
     );
   if (!chat?.messages) return undefined;
@@ -457,7 +457,7 @@ export function subscribeTyping(
       const value = snapshot.val();
       callback(
         value === true ||
-          (typeof value === 'number' && Date.now() - value < 8000),
+        (typeof value === 'number' && Date.now() - value < 8000),
       );
     },
   );
